@@ -11,8 +11,13 @@ import {
   type ButtonHandler,
 } from './discord/interactions.js';
 import { handleVeilleCron } from './handlers/veille.js';
+import { handleSuggestionsCron } from './handlers/suggestions.js';
+import { handleAdminMessage, setPendingModification } from './handlers/conversation.js';
 import { upsertRating } from './feedback/ratings.js';
 import { search, searchCount } from './search/engine.js';
+import { deepDive } from './veille/deep-dive.js';
+import { generateFinalScript } from './content/scripts.js';
+import { recordAnthropicUsage } from './budget/tracker.js';
 import {
   getDailyTotal,
   getWeeklyTotal,
@@ -23,6 +28,8 @@ import {
   searchResults as buildSearchResults,
   budgetReport as buildBudgetReport,
   preferenceProfile as buildPreferenceProfile,
+  deepDiveResult as buildDeepDiveResult,
+  production as buildProduction,
   successMessage,
   errorMessage,
   type BudgetPeriodData,
@@ -125,7 +132,6 @@ async function main(): Promise<void> {
     const key = interaction.options.getString('key', true);
     const value = interaction.options.getString('value', true);
 
-    // For now, config changes are logged but not persisted dynamically
     logger.info({ key, value }, 'Config change requested');
     const payload = successMessage(`Config \`${key}\` = \`${value}\` (note: les changements dynamiques seront implémentés dans une prochaine version).`);
     await interaction.reply({ embeds: payload.embeds });
@@ -134,6 +140,7 @@ async function main(): Promise<void> {
   // ─── 6. Button Handlers ───
   const buttonHandlers = new Map<string, ButtonHandler>();
 
+  // Veille feedback
   buttonHandlers.set('thumbup', async (interaction, parsed) => {
     upsertRating(db, parsed.targetTable, parsed.targetId, 1, interaction.user.id);
     await interaction.reply({ content: '👍 Noté !', ephemeral: true });
@@ -150,20 +157,114 @@ async function main(): Promise<void> {
     await interaction.update({ components: [] });
   });
 
-  buttonHandlers.set('transform', async (interaction, _parsed) => {
+  // Deep dive — fetch article, analyze, post results
+  buttonHandlers.set('transform', async (interaction, parsed) => {
+    await interaction.deferReply();
+
+    try {
+      const result = await deepDive(db, parsed.targetId);
+      recordAnthropicUsage(db, result.tokensUsed.input, result.tokensUsed.output);
+
+      const article = db.prepare('SELECT title, translated_title FROM veille_articles WHERE id = ?')
+        .get(parsed.targetId) as { title: string; translated_title: string | null } | undefined;
+
+      const title = article?.translated_title ?? article?.title ?? 'Article';
+
+      const payload = buildDeepDiveResult({
+        articleTitle: title,
+        analysis: result.analysis,
+        contentSuggestions: result.contentSuggestions,
+        articleId: parsed.targetId,
+      });
+
+      await interaction.editReply({
+        embeds: payload.embeds,
+        components: payload.components,
+      });
+
+      db.prepare('UPDATE veille_articles SET status = ? WHERE id = ?')
+        .run('transformed', parsed.targetId);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      const payload = errorMessage(`Deep dive échoué : ${msg}`);
+      await interaction.editReply({ embeds: payload.embeds });
+    }
+  });
+
+  // Deep dive → accept as suggestion (placeholder — creates a simple suggestion)
+  buttonHandlers.set('transform_accept', async (interaction, parsed) => {
     await interaction.reply({
-      content: '🎯 Transformation en contenu — cette fonctionnalité sera disponible en Phase 2.',
+      content: '✅ Article marqué pour transformation. Une suggestion sera générée au prochain cycle.',
+      ephemeral: true,
+    });
+    db.prepare('UPDATE veille_articles SET status = ? WHERE id = ?')
+      .run('proposed', parsed.targetId);
+  });
+
+  // Suggestion — Go → generate final script → post in #production
+  buttonHandlers.set('go', async (interaction, parsed) => {
+    await interaction.deferUpdate();
+
+    db.prepare('UPDATE suggestions SET status = ?, decided_at = datetime(\'now\') WHERE id = ?')
+      .run('go', parsed.targetId);
+    upsertRating(db, 'suggestions', parsed.targetId, 1, interaction.user.id);
+
+    // Remove buttons from the suggestion message
+    await interaction.editReply({ components: [] });
+
+    try {
+      const suggestion = db.prepare('SELECT content, platform, format FROM suggestions WHERE id = ?')
+        .get(parsed.targetId) as { content: string; platform: string; format: string | null } | undefined;
+
+      if (suggestion === undefined) {
+        return;
+      }
+
+      const script = await generateFinalScript(
+        suggestion.content,
+        suggestion.platform,
+        suggestion.format ?? 'reel',
+      );
+
+      const payload = buildProduction({
+        id: parsed.targetId,
+        textOverlay: script.textOverlay,
+        fullScript: script.fullScript,
+        hashtags: script.hashtags,
+        platform: script.platform,
+        suggestedTime: script.suggestedTime,
+        notes: script.notes,
+      });
+
+      await channels.production.send({
+        embeds: payload.embeds,
+        components: payload.components,
+      });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      logger.error({ error: msg, suggestionId: parsed.targetId }, 'Failed to generate final script');
+    }
+  });
+
+  // Suggestion — Modify → set pending modification, wait for text in #admin
+  buttonHandlers.set('modify', async (interaction, parsed) => {
+    const suggestion = db.prepare('SELECT content FROM suggestions WHERE id = ?')
+      .get(parsed.targetId) as { content: string } | undefined;
+
+    if (suggestion === undefined) {
+      await interaction.reply({ content: 'Suggestion introuvable.', ephemeral: true });
+      return;
+    }
+
+    setPendingModification(interaction.user.id, parsed.targetId, suggestion.content);
+
+    await interaction.reply({
+      content: '✏️ Qu\'est-ce que tu veux modifier ? Écris tes instructions dans **#admin**. (expire dans 5 min)',
       ephemeral: true,
     });
   });
 
-  buttonHandlers.set('go', async (interaction, parsed) => {
-    db.prepare('UPDATE suggestions SET status = ?, decided_at = datetime(\'now\') WHERE id = ?')
-      .run('go', parsed.targetId);
-    upsertRating(db, 'suggestions', parsed.targetId, 1, interaction.user.id);
-    await interaction.update({ components: [] });
-  });
-
+  // Suggestion — Skip
   buttonHandlers.set('skip', async (interaction, parsed) => {
     db.prepare('UPDATE suggestions SET status = ?, decided_at = datetime(\'now\') WHERE id = ?')
       .run('skipped', parsed.targetId);
@@ -171,17 +272,37 @@ async function main(): Promise<void> {
     await interaction.update({ components: [] });
   });
 
-  buttonHandlers.set('modify', async (interaction, _parsed) => {
-    await interaction.reply({
-      content: 'Qu\'est-ce que tu veux modifier ?',
-      ephemeral: true,
-    });
-  });
-
+  // Suggestion — Later
   buttonHandlers.set('later', async (interaction, parsed) => {
     db.prepare('UPDATE suggestions SET status = ? WHERE id = ?')
       .run('later', parsed.targetId);
     await interaction.reply({ content: '⏰ Remis à plus tard.', ephemeral: true });
+  });
+
+  // Production — Validate (placeholder for Phase 4 publication)
+  buttonHandlers.set('validate', async (interaction, _parsed) => {
+    await interaction.reply({
+      content: '✅ Script validé. La publication via Postiz sera disponible en Phase 4.',
+      ephemeral: true,
+    });
+  });
+
+  // Production — Retouch
+  buttonHandlers.set('retouch', async (interaction, parsed) => {
+    const suggestion = db.prepare('SELECT content FROM suggestions WHERE id = ?')
+      .get(parsed.targetId) as { content: string } | undefined;
+
+    if (suggestion === undefined) {
+      await interaction.reply({ content: 'Contenu introuvable.', ephemeral: true });
+      return;
+    }
+
+    setPendingModification(interaction.user.id, parsed.targetId, suggestion.content);
+
+    await interaction.reply({
+      content: '✏️ Qu\'est-ce que tu veux retoucher ? Écris tes instructions dans **#admin**. (expire dans 5 min)',
+      ephemeral: true,
+    });
   });
 
   // ─── 7. Interaction Router ───
@@ -194,7 +315,17 @@ async function main(): Promise<void> {
     void handleInteraction(interaction);
   });
 
-  // ─── 8. Scheduler ───
+  // ─── 8. Message Listener (#admin — free text for modifications) ───
+  client.on(Events.MessageCreate, (message) => {
+    if (message.channelId === channels.admin.id) {
+      void handleAdminMessage(message, {
+        db,
+        ideesChannel: channels.idees,
+      });
+    }
+  });
+
+  // ─── 9. Scheduler ───
   const jobs: SchedulerJob[] = [
     {
       name: 'veille',
@@ -209,12 +340,25 @@ async function main(): Promise<void> {
         });
       },
     },
+    {
+      name: 'suggestions',
+      cronExpression: config.SUGGESTIONS_CRON,
+      runOnMissed: true,
+      handler: async () => {
+        await handleSuggestionsCron({
+          db,
+          ideesChannel: channels.idees,
+          logsChannel: channels.logs,
+          adminChannel: channels.admin,
+        });
+      },
+    },
   ];
 
   const scheduler = createScheduler(db, jobs);
   scheduler.start();
 
-  // ─── 9. Graceful Shutdown ───
+  // ─── 10. Graceful Shutdown ───
   const shutdown = async (signal: string): Promise<void> => {
     logger.info({ signal }, 'Shutting down');
     scheduler.stop();
@@ -226,7 +370,7 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
-  // ─── 10. Ready ───
+  // ─── 11. Ready ───
   logger.info('tumulte-bot is fully operational');
 }
 

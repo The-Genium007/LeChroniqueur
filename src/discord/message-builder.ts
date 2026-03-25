@@ -220,6 +220,92 @@ export function suggestion(data: SuggestionData): MessagePayload {
   return { embeds: [embed], components: [row] };
 }
 
+// ─── Production (script final) ───
+
+export interface ProductionData {
+  readonly id: number;
+  readonly textOverlay: string;
+  readonly fullScript: string;
+  readonly hashtags: string;
+  readonly platform: string;
+  readonly suggestedTime: string;
+  readonly notes: string;
+}
+
+export function production(data: ProductionData): MessagePayload {
+  const embed = new EmbedBuilder()
+    .setColor(COLORS.PRODUCTION)
+    .setTitle('🎬 Script final — prêt à produire')
+    .addFields(
+      { name: '📝 Texte overlay', value: data.textOverlay.slice(0, 1024) || '(vide)' },
+      { name: '🎥 Script complet', value: data.fullScript.slice(0, 1024) || '(vide)' },
+      { name: '🏷️ Hashtags', value: data.hashtags || '(aucun)', inline: true },
+      { name: '📱 Plateforme', value: data.platform, inline: true },
+      { name: '⏰ Heure suggérée', value: data.suggestedTime || 'non définie', inline: true },
+    )
+    .setTimestamp();
+
+  if (data.notes.length > 0) {
+    embed.addFields({ name: '📋 Notes de production', value: data.notes.slice(0, 1024) });
+  }
+
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`validate:productions:${String(data.id)}`)
+      .setLabel('Valider')
+      .setEmoji('✅')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`retouch:productions:${String(data.id)}`)
+      .setLabel('Retoucher')
+      .setEmoji('✏️')
+      .setStyle(ButtonStyle.Primary),
+  );
+
+  return { embeds: [embed], components: [row] };
+}
+
+// ─── Deep Dive ───
+
+export interface DeepDiveData {
+  readonly articleTitle: string;
+  readonly analysis: string;
+  readonly contentSuggestions: readonly string[];
+  readonly articleId: number;
+}
+
+export function deepDiveResult(data: DeepDiveData): MessagePayload {
+  const embed = new EmbedBuilder()
+    .setColor(COLORS.VEILLE)
+    .setTitle(`🎯 Deep dive — ${data.articleTitle.slice(0, 80)}`)
+    .addFields(
+      { name: '📊 Analyse', value: data.analysis.slice(0, 1024) || '(aucune)' },
+    )
+    .setTimestamp();
+
+  data.contentSuggestions.forEach((suggestion, i) => {
+    embed.addFields({
+      name: `💡 Suggestion ${String(i + 1)}`,
+      value: suggestion.slice(0, 1024),
+    });
+  });
+
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`transform_accept:veille_articles:${String(data.articleId)}`)
+      .setLabel('Créer une suggestion')
+      .setEmoji('✅')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`archive:veille_articles:${String(data.articleId)}`)
+      .setLabel('Archiver')
+      .setEmoji('⏭️')
+      .setStyle(ButtonStyle.Secondary),
+  );
+
+  return { embeds: [embed], components: [row] };
+}
+
 // ─── Search Results ───
 
 export function searchResults(
