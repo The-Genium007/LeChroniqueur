@@ -492,6 +492,221 @@ export function preferenceProfile(entries: readonly PreferenceEntryData[]): Mess
   return { embeds: [embed], components: [] };
 }
 
+// ─── Image Gallery ───
+
+export interface ImageGalleryVariant {
+  readonly index: number;
+  readonly naming: string;
+  readonly postizPath?: string | undefined;
+  readonly dbId?: number | undefined;
+}
+
+export interface ImageGalleryData {
+  readonly suggestionId: number;
+  readonly variants: readonly ImageGalleryVariant[];
+}
+
+export function imageGallery(data: ImageGalleryData): MessagePayload {
+  const embed = new EmbedBuilder()
+    .setColor(COLORS.PRODUCTION)
+    .setTitle('🖼️ Variantes générées')
+    .setDescription(`${String(data.variants.length)} variantes pour la suggestion #${String(data.suggestionId)}`)
+    .setTimestamp();
+
+  for (const variant of data.variants) {
+    const postizInfo = variant.postizPath !== undefined
+      ? `[Voir dans Postiz](${variant.postizPath})`
+      : 'Upload Postiz en attente';
+
+    embed.addFields({
+      name: `Variante ${String(variant.index + 1)} — ${variant.naming}`,
+      value: postizInfo,
+    });
+  }
+
+  const buttons = data.variants.map((v) =>
+    new ButtonBuilder()
+      .setCustomId(`select_image:media:${String(v.dbId ?? 0)}`)
+      .setLabel(`Choisir #${String(v.index + 1)}`)
+      .setStyle(ButtonStyle.Primary),
+  );
+
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons);
+
+  return { embeds: [embed], components: [row] };
+}
+
+// ─── Video Segment Result ───
+
+export interface VideoSegmentResultData {
+  readonly naming: string;
+  readonly durationSeconds: number;
+  readonly postizPath?: string | undefined;
+  readonly dbId: number;
+}
+
+export function videoSegmentResult(data: VideoSegmentResultData): MessagePayload {
+  const embed = new EmbedBuilder()
+    .setColor(COLORS.PRODUCTION)
+    .setTitle('🎬 Segment vidéo généré')
+    .addFields(
+      { name: '📁 Fichier', value: data.naming, inline: true },
+      { name: '⏱️ Durée', value: `${String(data.durationSeconds)}s`, inline: true },
+    )
+    .setTimestamp();
+
+  if (data.postizPath !== undefined) {
+    embed.addFields({ name: '🔗 Postiz', value: `[Voir](${data.postizPath})` });
+  }
+
+  return { embeds: [embed], components: [] };
+}
+
+// ─── Publication Confirmation ───
+
+export interface PublicationConfirmationData {
+  readonly platform: string;
+  readonly scheduledAt: string;
+  readonly postizPostId: string;
+  readonly content: string;
+}
+
+export function publicationConfirmation(data: PublicationConfirmationData): MessagePayload {
+  const embed = new EmbedBuilder()
+    .setColor(COLORS.PUBLICATION)
+    .setTitle('📤 Publication programmée')
+    .addFields(
+      { name: '📱 Plateforme', value: data.platform, inline: true },
+      { name: '📅 Date', value: data.scheduledAt, inline: true },
+      { name: '🔗 Postiz ID', value: data.postizPostId, inline: true },
+      { name: '📝 Aperçu', value: data.content.slice(0, 200) },
+    )
+    .setTimestamp();
+
+  return { embeds: [embed], components: [] };
+}
+
+// ─── Weekly Report ───
+
+export interface WeeklyTopArticle {
+  readonly title: string;
+  readonly score: number;
+  readonly source: string;
+  readonly url: string;
+}
+
+export interface WeeklyPublication {
+  readonly platform: string;
+  readonly content: string;
+  readonly scheduledAt: string | null;
+  readonly views: number | null;
+  readonly likes: number | null;
+}
+
+export interface WeeklyPreferenceHighlight {
+  readonly dimension: string;
+  readonly value: string;
+  readonly score: number;
+}
+
+export interface WeeklyReportData {
+  readonly topArticles: readonly WeeklyTopArticle[];
+  readonly articleStats: {
+    readonly collected: number;
+    readonly proposed: number;
+    readonly transformed: number;
+    readonly archived: number;
+  };
+  readonly suggestionStats: {
+    readonly total: number;
+    readonly goCount: number;
+    readonly skipCount: number;
+    readonly modifiedCount: number;
+  };
+  readonly feedbackStats: {
+    readonly total: number;
+    readonly positive: number;
+    readonly negative: number;
+  };
+  readonly publications: readonly WeeklyPublication[];
+  readonly budget: {
+    readonly weekly: { readonly totalCents: number; readonly budgetCents: number; readonly percentUsed: number };
+    readonly monthly: { readonly totalCents: number; readonly budgetCents: number; readonly percentUsed: number };
+  };
+  readonly preferenceHighlights: readonly WeeklyPreferenceHighlight[];
+}
+
+export function weeklyReport(data: WeeklyReportData): MessagePayload {
+  const embed = new EmbedBuilder()
+    .setColor(COLORS.PRIMARY)
+    .setTitle('📊 Rapport hebdomadaire')
+    .setTimestamp();
+
+  // Top articles
+  if (data.topArticles.length > 0) {
+    const lines = data.topArticles.map((a) =>
+      `► [${a.title.slice(0, 60)}](${a.url}) (${String(a.score)}/10 — ${a.source})`,
+    );
+    embed.addFields({ name: '🔥 Top articles', value: lines.join('\n') });
+  }
+
+  // Article stats
+  const as = data.articleStats;
+  embed.addFields({
+    name: '📰 Veille',
+    value: `${String(as.collected)} collectés | ${String(as.proposed)} proposés | ${String(as.transformed)} transformés | ${String(as.archived)} archivés`,
+  });
+
+  // Suggestion stats
+  const ss = data.suggestionStats;
+  const goRate = ss.total > 0 ? Math.round((ss.goCount / ss.total) * 100) : 0;
+  embed.addFields({
+    name: '💡 Suggestions',
+    value: `${String(ss.total)} total | ✅ ${String(ss.goCount)} Go (${String(goRate)}%) | ⏭️ ${String(ss.skipCount)} Skip | ✏️ ${String(ss.modifiedCount)} Modifiées`,
+  });
+
+  // Feedback
+  const fs = data.feedbackStats;
+  embed.addFields({
+    name: '👍 Feedback',
+    value: `${String(fs.total)} ratings | 👍 ${String(fs.positive)} | 👎 ${String(fs.negative)}`,
+    inline: true,
+  });
+
+  // Publications
+  if (data.publications.length > 0) {
+    const lines = data.publications.map((p) => {
+      const metrics = p.views !== null ? ` — ${String(p.views)} vues, ${String(p.likes)} likes` : ' — métriques en attente';
+      return `► ${p.platform}: "${p.content.slice(0, 40)}..."${metrics}`;
+    });
+    embed.addFields({ name: '📤 Publications', value: lines.join('\n') });
+  } else {
+    embed.addFields({ name: '📤 Publications', value: 'Aucune cette semaine' });
+  }
+
+  // Budget
+  const bw = data.budget.weekly;
+  const bm = data.budget.monthly;
+  embed.addFields({
+    name: '💰 Budget',
+    value: [
+      `Semaine : ${centsToEuros(bw.totalCents)}€ / ${centsToEuros(bw.budgetCents)}€ (${String(bw.percentUsed)}%) ${progressBar(bw.percentUsed, 10)}`,
+      `Mois : ${centsToEuros(bm.totalCents)}€ / ${centsToEuros(bm.budgetCents)}€ (${String(bm.percentUsed)}%) ${progressBar(bm.percentUsed, 10)}`,
+    ].join('\n'),
+  });
+
+  // Preference highlights
+  if (data.preferenceHighlights.length > 0) {
+    const lines = data.preferenceHighlights.map((p) => {
+      const sign = p.score >= 0 ? '+' : '';
+      return `${p.dimension}/${p.value}: ${sign}${p.score.toFixed(2)}`;
+    });
+    embed.addFields({ name: '📈 Évolution préférences', value: lines.join(' | ') });
+  }
+
+  return { embeds: [embed], components: [] };
+}
+
 // ─── Utility ───
 
 export function errorMessage(message: string): MessagePayload {

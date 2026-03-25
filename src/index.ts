@@ -13,12 +13,15 @@ import {
 import { handleVeilleCron } from './handlers/veille.js';
 import { handleSuggestionsCron } from './handlers/suggestions.js';
 import { handleAdminMessage, setPendingModification } from './handlers/conversation.js';
+import { handleGenerateImages } from './handlers/production.js';
+import { handlePublish } from './handlers/publication.js';
+import { handleWeeklyRapport } from './handlers/rapport.js';
 import { upsertRating } from './feedback/ratings.js';
 import { search, searchCount } from './search/engine.js';
 import { deepDive } from './veille/deep-dive.js';
 import { generateFinalScript } from './content/scripts.js';
-import { recordAnthropicUsage } from './budget/tracker.js';
 import {
+  recordAnthropicUsage,
   getDailyTotal,
   getWeeklyTotal,
   getMonthlyTotal,
@@ -279,12 +282,48 @@ async function main(): Promise<void> {
     await interaction.reply({ content: '⏰ Remis à plus tard.', ephemeral: true });
   });
 
-  // Production — Validate (placeholder for Phase 4 publication)
-  buttonHandlers.set('validate', async (interaction, _parsed) => {
-    await interaction.reply({
-      content: '✅ Script validé. La publication via Postiz sera disponible en Phase 4.',
-      ephemeral: true,
-    });
+  // Production — Validate → generate images + schedule publication
+  buttonHandlers.set('validate', async (interaction, parsed) => {
+    await interaction.deferReply();
+
+    // Generate images
+    try {
+      await handleGenerateImages(interaction, parsed.targetId, {
+        db,
+        productionChannel: channels.production,
+        logsChannel: channels.logs,
+        adminChannel: channels.admin,
+      });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      logger.error({ error: msg }, 'Image generation in validate failed');
+    }
+
+    // Schedule publication (default: tomorrow at suggested time or 19h)
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(19, 0, 0, 0);
+
+    try {
+      await handlePublish(parsed.targetId, tomorrow, {
+        db,
+        publicationChannel: channels.publication,
+        logsChannel: channels.logs,
+      });
+      await interaction.editReply({ content: '✅ Script validé, images générées, publication programmée.' });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      logger.error({ error: msg }, 'Publication scheduling in validate failed');
+      await interaction.editReply({ content: `✅ Script validé, images générées. ⚠️ Publication échouée : ${msg}` });
+    }
+  });
+
+  // Select image variant from gallery
+  buttonHandlers.set('select_image', async (interaction, parsed) => {
+    db.prepare('UPDATE media SET type = ? WHERE id = ?')
+      .run('image_selected', parsed.targetId);
+    await interaction.update({ components: [] });
+    await interaction.followUp({ content: `🖼️ Variante sélectionnée (media #${String(parsed.targetId)}).`, ephemeral: true });
   });
 
   // Production — Retouch
@@ -349,6 +388,18 @@ async function main(): Promise<void> {
           db,
           ideesChannel: channels.idees,
           logsChannel: channels.logs,
+          adminChannel: channels.admin,
+        });
+      },
+    },
+    {
+      name: 'rapport',
+      cronExpression: config.RAPPORT_CRON,
+      runOnMissed: false,
+      handler: async () => {
+        await handleWeeklyRapport({
+          db,
+          veilleChannel: channels.veille,
           adminChannel: channels.admin,
         });
       },
