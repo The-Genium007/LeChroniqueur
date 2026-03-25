@@ -1,4 +1,6 @@
 services:
+
+  # ─── Bot Discord (Le Chroniqueur) ───
   bot:
     build: .
     container_name: tumulte-bot
@@ -7,6 +9,8 @@ services:
     depends_on:
       searxng:
         condition: service_started
+      postiz:
+        condition: service_started
     volumes:
       - bot_data:/app/data
       - bot_logs:/app/logs
@@ -14,6 +18,7 @@ services:
     networks:
       - internal
 
+  # ─── SearXNG (moteur de recherche) ───
   searxng:
     image: searxng/searxng:latest
     container_name: tumulte-searxng
@@ -31,9 +36,79 @@ services:
     networks:
       - internal
 
+  # ─── Postiz (publication réseaux sociaux) ───
+  postiz:
+    image: ghcr.io/gitroomhq/postiz-app:latest
+    container_name: tumulte-postiz
+    restart: unless-stopped
+    depends_on:
+      postiz-db:
+        condition: service_healthy
+      postiz-redis:
+        condition: service_healthy
+    ports:
+      - "5000:5000"
+    environment:
+      DATABASE_URL: "postgresql://${POSTIZ_DB_USER}:${POSTIZ_DB_PASS}@postiz-db:5432/${POSTIZ_DB_NAME}"
+      REDIS_URL: "redis://postiz-redis:6379"
+      JWT_SECRET: "${POSTIZ_JWT}"
+      MAIN_URL: "${POSTIZ_MAIN_URL}"
+      FRONTEND_URL: "${POSTIZ_MAIN_URL}"
+      NEXT_PUBLIC_BACKEND_URL: "${POSTIZ_MAIN_URL}/api"
+      BACKEND_INTERNAL_URL: "http://postiz:5000"
+      IS_GENERAL: "true"
+      STORAGE_PROVIDER: "local"
+      UPLOAD_DIRECTORY: "/uploads"
+      DISABLE_REGISTRATION: "true"
+      INSTAGRAM_APP_ID: "${INSTAGRAM_APP_ID:-}"
+      INSTAGRAM_APP_SECRET: "${INSTAGRAM_APP_SECRET:-}"
+      TIKTOK_CLIENT_ID: "${TIKTOK_CLIENT_ID:-}"
+      TIKTOK_CLIENT_SECRET: "${TIKTOK_CLIENT_SECRET:-}"
+    volumes:
+      - postiz_uploads:/uploads
+    networks:
+      - internal
+
+  # ─── PostgreSQL (BDD Postiz) ───
+  postiz-db:
+    image: postgres:17-alpine
+    container_name: tumulte-postiz-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${POSTIZ_DB_USER}"
+      POSTGRES_PASSWORD: "${POSTIZ_DB_PASS}"
+      POSTGRES_DB: "${POSTIZ_DB_NAME}"
+    volumes:
+      - postiz_db:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postiz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Redis (cache Postiz) ───
+  postiz-redis:
+    image: redis:7-alpine
+    container_name: tumulte-postiz-redis
+    restart: unless-stopped
+    volumes:
+      - postiz_redis:/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 volumes:
   bot_data:
   bot_logs:
+  postiz_uploads:
+  postiz_db:
+  postiz_redis:
 
 networks:
   internal:

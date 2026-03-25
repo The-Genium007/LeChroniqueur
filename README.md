@@ -65,12 +65,12 @@ DISCORD_GUILD_ID=1387804174762377226
 DISCORD_OWNER_ID=256867307853316097
 
 # Channel IDs (récupérés à l'étape 1)
-CHANNEL_VEILLE=id_du_channel_veille
-CHANNEL_IDEES=id_du_channel_idees
-CHANNEL_PRODUCTION=id_du_channel_production
-CHANNEL_PUBLICATION=id_du_channel_publication
-CHANNEL_LOGS=id_du_channel_logs
-CHANNEL_ADMIN=id_du_channel_admin
+CHANNEL_VEILLE=id_du_channel
+CHANNEL_IDEES=id_du_channel
+CHANNEL_PRODUCTION=id_du_channel
+CHANNEL_PUBLICATION=id_du_channel
+CHANNEL_LOGS=id_du_channel
+CHANNEL_ADMIN=id_du_channel
 
 # Channels existants (lecture seule)
 CHANNEL_BUGS=1449809724965912676
@@ -82,11 +82,24 @@ ANTHROPIC_API_KEY=sk-ant-...
 # --- Google AI (laisser vide si billing pas activé) ---
 GOOGLE_AI_API_KEY=
 
-# --- Postiz ---
-POSTIZ_API_URL=https://postiz.tumulte.app/public/v1
-POSTIZ_API_KEY=11ec937af2937e08d99c2e6c4193d2dd3ab58921eb926ffe6b0b9008698f2421
+# --- Postiz (self-hosted — inclus dans le docker-compose) ---
+POSTIZ_MAIN_URL=https://postiz.tumulte.app
+POSTIZ_JWT=generé_avec_openssl_rand_base64_32
+POSTIZ_DB_USER=postiz
+POSTIZ_DB_PASS=un_mot_de_passe_fort
+POSTIZ_DB_NAME=postiz
 
-# --- SearXNG (ne pas modifier, réseau Docker interne) ---
+# --- Postiz API (réseau Docker interne) ---
+POSTIZ_API_URL=http://postiz:5000/public/v1
+POSTIZ_API_KEY=recupéré_dans_postiz_settings_developers
+
+# --- Réseaux sociaux (à remplir quand configurés dans Postiz) ---
+INSTAGRAM_APP_ID=
+INSTAGRAM_APP_SECRET=
+TIKTOK_CLIENT_ID=
+TIKTOK_CLIENT_SECRET=
+
+# --- SearXNG (réseau Docker interne) ---
 SEARXNG_URL=http://searxng:8080
 
 # --- Budget ---
@@ -104,6 +117,9 @@ LOG_LEVEL=info
 NODE_ENV=production
 ```
 
+> **Note :** Pour générer le `POSTIZ_JWT`, lance : `openssl rand -base64 32`
+> La `POSTIZ_API_KEY` se récupère dans l'interface Postiz : Settings > Developers > Public API.
+
 ### Étape 4 — Déployer sur Dokploy
 
 1. Ouvre Dokploy sur ton VPS
@@ -117,15 +133,28 @@ NODE_ENV=production
 
 Dokploy va :
 - Cloner le repo
-- Builder l'image Docker (TypeScript → JavaScript)
-- Lancer 2 containers : `tumulte-bot` + `tumulte-searxng`
+- Builder l'image Docker du bot (TypeScript → JavaScript)
+- Pull les images Postiz, PostgreSQL, Redis, SearXNG
+- Lancer 5 containers : `tumulte-bot` + `tumulte-searxng` + `tumulte-postiz` + `tumulte-postiz-db` + `tumulte-postiz-redis`
 - Le bot se connecte à Discord et enregistre les commandes slash
 
-### Étape 5 — Vérifier que ça tourne
+### Étape 5 — Configurer Postiz
+
+1. Ouvre `https://postiz.tumulte.app` dans ton navigateur
+2. Crée ton compte admin (premier utilisateur)
+3. Va dans **Settings > Developers > Public API**
+4. Copie la clé API et mets-la dans `POSTIZ_API_KEY` (variables Dokploy)
+5. Redéploie depuis Dokploy pour que le bot ait la clé
+
+> `DISABLE_REGISTRATION=true` dans le compose empêche les inscriptions publiques après ton premier compte.
+
+### Étape 6 — Vérifier que tout tourne
 
 Dans Discord, tape `/budget` dans `#admin`. Si le bot répond avec un embed de budget, tout est bon.
 
-Vérifie aussi `#logs` — le bot y log son démarrage.
+Vérifie aussi :
+- `#logs` — le bot y log son démarrage
+- `https://postiz.tumulte.app` — l'interface Postiz est accessible
 
 ### Étape 6 — Activer la génération de médias (optionnel)
 
@@ -145,8 +174,8 @@ Pour les images et vidéos (Phases 3 et 5) :
 3. Ajoute le produit "Instagram Business Login"
 4. Redirect URI : `https://postiz.tumulte.app/integrations/social/instagram-standalone`
 5. Copie App ID et App Secret
-6. Ajoute dans le `.env` de Postiz : `INSTAGRAM_APP_ID` + `INSTAGRAM_APP_SECRET`
-7. Redémarre Postiz (`docker compose restart` dans `/root/self-hosted/postiz/`)
+6. Ajoute `INSTAGRAM_APP_ID` et `INSTAGRAM_APP_SECRET` dans les variables Dokploy
+7. Redéploie
 8. Connecte le compte @lechroniqueur.tumulte dans l'interface Postiz
 
 **TikTok :**
@@ -154,8 +183,8 @@ Pour les images et vidéos (Phases 3 et 5) :
 2. Crée une app → Login Kit + Content Posting API (Direct Post)
 3. Redirect URI : `https://postiz.tumulte.app/integrations/social/tiktok`
 4. Copie Client ID et Client Secret
-5. Ajoute dans le `.env` de Postiz : `TIKTOK_CLIENT_ID` + `TIKTOK_CLIENT_SECRET`
-6. Redémarre Postiz
+5. Ajoute `TIKTOK_CLIENT_ID` et `TIKTOK_CLIENT_SECRET` dans les variables Dokploy
+6. Redéploie
 7. Connecte le compte @lechroniqueur.tumulte dans Postiz
 
 ### Étape 8 — Fournir le persona
