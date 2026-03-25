@@ -1,0 +1,85 @@
+use_default_settings: true
+
+general:
+  instance_name: "Tumulte SearXNG"
+  debug: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: ""
+
+server:
+  port: 8080
+  bind_address: "0.0.0.0"
+  secret_key: "changeme-in-production"
+  limiter: false
+
+ui:
+  static_use_hash: true
+
+engines:
+  # ─── Google ───
+  - name: google
+    engine: google
+    shortcut: g
+    disabled: false
+
+  - name: google news
+    engine: google_news
+    shortcut: gn
+    disabled: false
+
+  # ─── Reddit ───
+  - name: reddit
+    engine: reddit
+    shortcut: re
+    disabled: false
+
+  # ─── Twitter ───
+  - name: twitter
+    engine: twitter
+    shortcut: tw
+    disabled: false
+
+  # ─── YouTube ───
+  - name: youtube
+    engine: youtube_noapi
+    shortcut: yt
+    disabled: false
+
+  # ─── Hacker News ───
+  - name: hackernews
+    engine: hackernews
+    shortcut: hn
+    disabled: false
+
+  # ─── Imgur ───
+  - name: imgur
+    engine: imgur
+    shortcut: img
+    disabled: false
+
+  # ─── DuckDuckGo (fallback) ───
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg
+    disabled: false
+
+  # ─── Bing ───
+  - name: bing
+    engine: bing
+    shortcut: bi
+    disabled: false
+
+  - name: bing news
+    engine: bing_news
+    shortcut: bin
+    disabled: false
+
+outgoing:
+  request_timeout: 10
+  max_request_timeout: 15
+  useragent_suffix: ""
+  pool_connections: 100
+  pool_maxsize: 20

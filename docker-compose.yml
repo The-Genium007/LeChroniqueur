@@ -1,0 +1,40 @@
+services:
+  bot:
+    build: .
+    container_name: tumulte-bot
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      searxng:
+        condition: service_started
+    volumes:
+      - bot_data:/app/data
+      - bot_logs:/app/logs
+      - ./prompts:/app/prompts:ro
+    networks:
+      - internal
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: tumulte-searxng
+    restart: unless-stopped
+    volumes:
+      - ./config/searxng:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=http://searxng:8080/
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    networks:
+      - internal
+
+volumes:
+  bot_data:
+  bot_logs:
+
+networks:
+  internal:
+    driver: bridge
