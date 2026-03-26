@@ -22,24 +22,22 @@ interface InteractionRouter {
 
 export function parseButtonCustomId(customId: string): ButtonAction | undefined {
   const parts = customId.split(':');
-  if (parts.length < 3) {
+  if (parts.length < 2) {
     return undefined;
   }
 
   const action = parts[0];
   const targetTable = parts[1];
+
+  if (action === undefined || targetTable === undefined) {
+    return undefined;
+  }
+
+  // 2-segment IDs (dash:home, search:open) → targetId = 0
   const targetIdStr = parts[2];
+  const targetId = targetIdStr !== undefined ? parseInt(targetIdStr, 10) : 0;
 
-  if (action === undefined || targetTable === undefined || targetIdStr === undefined) {
-    return undefined;
-  }
-
-  const targetId = parseInt(targetIdStr, 10);
-  if (isNaN(targetId)) {
-    return undefined;
-  }
-
-  return { action, targetTable, targetId };
+  return { action, targetTable, targetId: isNaN(targetId) ? 0 : targetId };
 }
 
 export function createInteractionRouter(router: InteractionRouter) {

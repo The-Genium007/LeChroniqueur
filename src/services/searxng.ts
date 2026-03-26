@@ -53,6 +53,12 @@ export async function search(
   const config = getConfig();
   const logger = getLogger();
 
+  if (config.MOCK_APIS) {
+    const { MOCK_SEARXNG_RESULTS } = await import('../dev/fixtures.js');
+    logger.debug({ query, engines: options?.engines }, 'MOCK SearXNG search');
+    return MOCK_SEARXNG_RESULTS;
+  }
+
   await rateLimitWait();
 
   const params = new URLSearchParams({

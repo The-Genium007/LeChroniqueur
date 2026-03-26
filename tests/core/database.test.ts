@@ -49,9 +49,9 @@ describe('migrations', () => {
       .prepare('SELECT name FROM _migrations ORDER BY id')
       .all() as Array<{ name: string }>;
 
-    expect(migrations.length).toBe(11);
+    expect(migrations.length).toBe(15);
     expect(migrations[0]?.name).toBe('001_create_veille_articles');
-    expect(migrations[10]?.name).toBe('011_create_budget_alerts');
+    expect(migrations[14]?.name).toBe('015_create_config_history');
   });
 
   it('should be idempotent — running migrations twice does not fail', () => {
@@ -59,7 +59,7 @@ describe('migrations', () => {
     expect(() => runMigrations(db)).not.toThrow();
 
     const migrations = db.prepare('SELECT COUNT(*) AS count FROM _migrations').get() as { count: number };
-    expect(migrations.count).toBe(11);
+    expect(migrations.count).toBe(15);
   });
 });
 

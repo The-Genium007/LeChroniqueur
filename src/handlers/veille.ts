@@ -1,4 +1,3 @@
-import type { TextChannel } from 'discord.js';
 import type { SqliteDatabase } from '../core/database.js';
 import { getLogger } from '../core/logger.js';
 import { collect } from '../veille/collector.js';
@@ -12,6 +11,10 @@ import {
   budgetAlert as buildBudgetAlert,
   type VeilleArticleSummary,
 } from '../discord/message-builder.js';
+import type { InstanceContext } from '../registry/instance-context.js';
+import type { TextChannel } from 'discord.js';
+
+// ─── Legacy interface (kept for backward compat during transition) ───
 
 interface VeilleHandlerDeps {
   readonly db: SqliteDatabase;
@@ -45,19 +48,21 @@ function saveArticle(db: SqliteDatabase, article: AnalyzedArticle): number {
   return Number(result.lastInsertRowid);
 }
 
-export async function handleVeilleCron(deps: VeilleHandlerDeps): Promise<void> {
+async function runVeillePipeline(
+  db: SqliteDatabase,
+  veilleChannel: TextChannel,
+  logsChannel: TextChannel,
+  adminChannel: TextChannel,
+): Promise<void> {
   const logger = getLogger();
-  const { db, veilleChannel, logsChannel, adminChannel } = deps;
 
   logger.info('Starting veille pipeline');
 
-  // 1. Check budget
   if (!isApiAllowed(db)) {
     logger.warn('API budget exhausted, skipping veille analysis');
     return;
   }
 
-  // 2. Recalculate preferences
   recalculate(db);
   const preferences = getProfile(db).map((p) => ({
     dimension: p.dimension,
@@ -66,7 +71,6 @@ export async function handleVeilleCron(deps: VeilleHandlerDeps): Promise<void> {
     totalCount: p.totalCount,
   }));
 
-  // 3. Collect articles via SearXNG
   const { articles: rawArticles, stats } = await collect(db);
 
   if (rawArticles.length === 0) {
@@ -74,23 +78,18 @@ export async function handleVeilleCron(deps: VeilleHandlerDeps): Promise<void> {
     return;
   }
 
-  // Track SearXNG usage
   recordSearxngQuery(db, stats.totalFetched);
 
-  // 4. Analyze with Claude
   const { articles: analyzed, tokensUsed } = await analyze(rawArticles, preferences);
 
-  // Track Anthropic usage
   recordAnthropicUsage(db, tokensUsed.input, tokensUsed.output);
 
-  // 5. Save articles to database and index for search
   const savedArticles: Array<{ article: AnalyzedArticle; id: number }> = [];
 
   for (const article of analyzed) {
     const id = saveArticle(db, article);
     savedArticles.push({ article, id });
 
-    // Index for FTS5 search
     indexDocument(db, {
       title: article.translatedTitle ?? article.title,
       snippet: article.translatedSnippet ?? article.snippet,
@@ -100,7 +99,6 @@ export async function handleVeilleCron(deps: VeilleHandlerDeps): Promise<void> {
     });
   }
 
-  // 6. Sort by score and build summaries
   const sortedArticles = savedArticles
     .sort((a, b) => b.article.score - a.article.score);
 
@@ -117,20 +115,18 @@ export async function handleVeilleCron(deps: VeilleHandlerDeps): Promise<void> {
       publishedDate: a.article.publishedDate,
     }));
 
-  // 7. Send digest to #veille
   const digestPayload = veilleDigest(topArticles, stats);
   const digestMessage = await veilleChannel.send({
     embeds: digestPayload.embeds,
     components: digestPayload.components,
   });
 
-  // 8. Create thread with individual articles (score >= 5)
   const threadArticles = sortedArticles.filter((a) => a.article.score >= 5);
 
   if (threadArticles.length > 0) {
     const thread = await digestMessage.startThread({
       name: `Détails veille — ${new Date().toLocaleDateString('fr-FR')}`,
-      autoArchiveDuration: 1440, // 24h
+      autoArchiveDuration: 1440,
     });
 
     for (const { article, id } of threadArticles) {
@@ -150,13 +146,11 @@ export async function handleVeilleCron(deps: VeilleHandlerDeps): Promise<void> {
         components: articlePayload.components,
       });
 
-      // Update database with Discord message ID
       db.prepare('UPDATE veille_articles SET discord_message_id = ?, discord_thread_id = ? WHERE id = ?')
         .run(articleMsg.id, thread.id, id);
     }
   }
 
-  // 9. Check budget thresholds
   const alerts = checkThresholds(db);
   for (const alert of alerts) {
     const alertPayload = buildBudgetAlert(
@@ -182,4 +176,21 @@ export async function handleVeilleCron(deps: VeilleHandlerDeps): Promise<void> {
     },
     'Veille pipeline complete',
   );
+}
+
+// ─── V2: InstanceContext entry point ───
+
+export async function handleVeilleCronV2(ctx: InstanceContext): Promise<void> {
+  await runVeillePipeline(
+    ctx.db,
+    ctx.channels.veille,
+    ctx.channels.logs,
+    ctx.channels.logs, // V2 has no separate admin channel — logs doubles
+  );
+}
+
+// ─── Legacy entry point (backward compat) ───
+
+export async function handleVeilleCron(deps: VeilleHandlerDeps): Promise<void> {
+  await runVeillePipeline(deps.db, deps.veilleChannel, deps.logsChannel, deps.adminChannel);
 }

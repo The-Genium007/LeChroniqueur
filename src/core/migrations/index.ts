@@ -206,6 +206,59 @@ const migrations: readonly Migration[] = [
       );
     `,
   },
+  // ─── V2 Phase 1 : Config dynamique ───
+  {
+    name: '012_create_persona',
+    up: `
+      CREATE TABLE IF NOT EXISTS persona (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        content TEXT NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `,
+  },
+  {
+    name: '013_create_veille_categories',
+    up: `
+      CREATE TABLE IF NOT EXISTS veille_categories (
+        id TEXT PRIMARY KEY,
+        label TEXT NOT NULL,
+        keywords_en TEXT NOT NULL DEFAULT '[]',
+        keywords_fr TEXT NOT NULL DEFAULT '[]',
+        engines TEXT NOT NULL DEFAULT '[]',
+        max_age_hours INTEGER NOT NULL DEFAULT 72,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        sort_order INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_veille_categories_active ON veille_categories(is_active)
+    `,
+  },
+  {
+    name: '014_create_config_overrides',
+    up: `
+      CREATE TABLE IF NOT EXISTS config_overrides (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_by TEXT
+      )
+    `,
+  },
+  {
+    name: '015_create_config_history',
+    up: `
+      CREATE TABLE IF NOT EXISTS config_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        key TEXT NOT NULL,
+        old_value TEXT,
+        new_value TEXT NOT NULL,
+        changed_by TEXT NOT NULL,
+        changed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE INDEX IF NOT EXISTS idx_config_history_key ON config_history(key);
+      CREATE INDEX IF NOT EXISTS idx_config_history_date ON config_history(changed_at DESC)
+    `,
+  },
 ];
 
 export function runMigrations(db: Database): void {

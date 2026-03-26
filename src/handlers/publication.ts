@@ -155,13 +155,15 @@ export async function handlePublish(
         (i) => i.identifier === 'tiktok' && !i.disabled,
       );
 
-      if (tiktokIntegrations.length > 0 && tiktokIntegrations[0] !== undefined) {
+      const tiktokInteg = tiktokIntegrations[0];
+      const basePost = postPayload.posts[0];
+      if (tiktokInteg !== undefined && basePost !== undefined) {
         const tiktokPayload: PostizPostPayload = {
           ...postPayload,
           posts: [
             {
-              ...postPayload.posts[0]!,
-              integration: { id: tiktokIntegrations[0].id },
+              ...basePost,
+              integration: { id: tiktokInteg.id },
               settings: { __type: 'tiktok' },
             },
           ],

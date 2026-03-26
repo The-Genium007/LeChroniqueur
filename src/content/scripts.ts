@@ -1,7 +1,6 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import { complete } from '../services/anthropic.js';
 import { getLogger } from '../core/logger.js';
+import { personaLoader } from '../core/persona-loader.js';
 
 export interface FinalScript {
   readonly textOverlay: string;
@@ -12,21 +11,8 @@ export interface FinalScript {
   readonly notes: string;
 }
 
-let _personaPrompt: string | undefined;
-
 function loadPersona(): string {
-  if (_personaPrompt !== undefined) {
-    return _personaPrompt;
-  }
-
-  const skillPath = path.join(process.cwd(), 'prompts', 'SKILL.md');
-
-  if (!fs.existsSync(skillPath)) {
-    return 'Tu es Le Chroniqueur, un MJ légendaire francophone. Tutoiement, sarcasme taquin, références JDR.';
-  }
-
-  _personaPrompt = fs.readFileSync(skillPath, 'utf-8');
-  return _personaPrompt;
+  return personaLoader.loadLegacy();
 }
 
 export async function generateFinalScript(

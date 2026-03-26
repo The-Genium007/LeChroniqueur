@@ -1,10 +1,9 @@
 import { z } from 'zod';
-import fs from 'node:fs';
-import path from 'node:path';
 import { complete } from '../services/anthropic.js';
 import { getLogger } from '../core/logger.js';
 import type { SqliteDatabase } from '../core/database.js';
 import { formatProfileForPrompt } from '../feedback/preference-learner.js';
+import { personaLoader } from '../core/persona-loader.js';
 
 export interface GeneratedSuggestion {
   readonly hook: string;
@@ -32,21 +31,8 @@ const suggestionsResponseSchema = z.object({
   suggestions: z.array(suggestionItemSchema),
 });
 
-let _personaPrompt: string | undefined;
-
 function loadPersona(): string {
-  if (_personaPrompt !== undefined) {
-    return _personaPrompt;
-  }
-
-  const skillPath = path.join(process.cwd(), 'prompts', 'SKILL.md');
-
-  if (!fs.existsSync(skillPath)) {
-    return 'Tu es Le Chroniqueur, un MJ légendaire francophone. Tutoiement, sarcasme taquin, références JDR.';
-  }
-
-  _personaPrompt = fs.readFileSync(skillPath, 'utf-8');
-  return _personaPrompt;
+  return personaLoader.loadLegacy();
 }
 
 interface RecentArticle {

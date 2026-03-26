@@ -1,8 +1,7 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import { complete } from '../services/anthropic.js';
 import { getLogger } from '../core/logger.js';
 import type { SqliteDatabase } from '../core/database.js';
+import { personaLoader } from '../core/persona-loader.js';
 
 export interface DeepDiveResult {
   readonly analysis: string;
@@ -24,21 +23,8 @@ interface VeilleArticleRow {
   suggested_angle: string | null;
 }
 
-let _personaPrompt: string | undefined;
-
 function loadPersona(): string {
-  if (_personaPrompt !== undefined) {
-    return _personaPrompt;
-  }
-
-  const skillPath = path.join(process.cwd(), 'prompts', 'SKILL.md');
-
-  if (!fs.existsSync(skillPath)) {
-    return 'Tu es Le Chroniqueur, un MJ légendaire francophone.';
-  }
-
-  _personaPrompt = fs.readFileSync(skillPath, 'utf-8');
-  return _personaPrompt;
+  return personaLoader.loadLegacy();
 }
 
 async function fetchArticleContent(url: string): Promise<string> {

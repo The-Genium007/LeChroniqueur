@@ -1,4 +1,5 @@
-FROM node:20-alpine AS builder
+# ── Stage 1: Build ──
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
@@ -10,18 +11,21 @@ COPY src/ ./src/
 
 RUN npm run build
 
-FROM node:20-alpine
+# ── Stage 2: Production ──
+FROM node:22-alpine
 
 WORKDIR /app
 
-RUN apk add --no-cache tini
+RUN apk add --no-cache tini curl
 
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev
 
 COPY --from=builder /app/dist ./dist
+COPY prompts/ ./prompts/
+COPY config/ ./config/
 
-RUN mkdir -p /app/data /app/logs
+RUN mkdir -p /app/data /app/data/instances
 
 USER node
 

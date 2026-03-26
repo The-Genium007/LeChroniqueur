@@ -8,13 +8,7 @@ import {
   suggestion as buildSuggestionEmbed,
   budgetAlert as buildBudgetAlert,
 } from '../discord/message-builder.js';
-
-interface SuggestionsHandlerDeps {
-  readonly db: SqliteDatabase;
-  readonly ideesChannel: TextChannel;
-  readonly logsChannel: TextChannel;
-  readonly adminChannel: TextChannel;
-}
+import type { InstanceContext } from '../registry/instance-context.js';
 
 function saveSuggestion(
   db: SqliteDatabase,
@@ -44,9 +38,13 @@ function saveSuggestion(
   return Number(result.lastInsertRowid);
 }
 
-export async function handleSuggestionsCron(deps: SuggestionsHandlerDeps): Promise<void> {
+async function runSuggestionsPipeline(
+  db: SqliteDatabase,
+  ideesChannel: TextChannel,
+  logsChannel: TextChannel,
+  alertChannel: TextChannel,
+): Promise<void> {
   const logger = getLogger();
-  const { db, ideesChannel, logsChannel, adminChannel } = deps;
 
   logger.info('Starting suggestions pipeline');
 
@@ -65,7 +63,6 @@ export async function handleSuggestionsCron(deps: SuggestionsHandlerDeps): Promi
   for (const suggestion of suggestions) {
     const id = saveSuggestion(db, suggestion);
 
-    // Index for search
     indexDocument(db, {
       title: suggestion.hook,
       snippet: suggestion.script.slice(0, 200),
@@ -74,13 +71,11 @@ export async function handleSuggestionsCron(deps: SuggestionsHandlerDeps): Promi
       sourceId: id,
     });
 
-    // Mark source article as proposed if applicable
     if (suggestion.sourceArticleId !== undefined) {
       db.prepare('UPDATE veille_articles SET status = ? WHERE id = ? AND status = ?')
         .run('proposed', suggestion.sourceArticleId, 'new');
     }
 
-    // Build and send Discord embed
     const payload = buildSuggestionEmbed({
       id,
       content: [
@@ -101,12 +96,10 @@ export async function handleSuggestionsCron(deps: SuggestionsHandlerDeps): Promi
       components: payload.components,
     });
 
-    // Store Discord message ID
     db.prepare('UPDATE suggestions SET discord_message_id = ? WHERE id = ?')
       .run(message.id, id);
   }
 
-  // Check budget thresholds
   const alerts = checkThresholds(db);
   for (const alert of alerts) {
     const alertPayload = buildBudgetAlert(
@@ -115,7 +108,7 @@ export async function handleSuggestionsCron(deps: SuggestionsHandlerDeps): Promi
       alert.costCents,
       alert.budgetCents,
     );
-    const targetChannel = alert.period === 'monthly' ? adminChannel : logsChannel;
+    const targetChannel = alert.period === 'monthly' ? alertChannel : logsChannel;
     await targetChannel.send({
       embeds: alertPayload.embeds,
       components: alertPayload.components,
@@ -123,4 +116,28 @@ export async function handleSuggestionsCron(deps: SuggestionsHandlerDeps): Promi
   }
 
   logger.info({ count: suggestions.length }, 'Suggestions pipeline complete');
+}
+
+// ─── V2: InstanceContext entry point ───
+
+export async function handleSuggestionsCronV2(ctx: InstanceContext): Promise<void> {
+  await runSuggestionsPipeline(
+    ctx.db,
+    ctx.channels.idees,
+    ctx.channels.logs,
+    ctx.channels.logs,
+  );
+}
+
+// ─── Legacy entry point ───
+
+interface SuggestionsHandlerDeps {
+  readonly db: SqliteDatabase;
+  readonly ideesChannel: TextChannel;
+  readonly logsChannel: TextChannel;
+  readonly adminChannel: TextChannel;
+}
+
+export async function handleSuggestionsCron(deps: SuggestionsHandlerDeps): Promise<void> {
+  await runSuggestionsPipeline(deps.db, deps.ideesChannel, deps.logsChannel, deps.adminChannel);
 }

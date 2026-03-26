@@ -113,8 +113,92 @@ const CATEGORIES: readonly VeilleCategory[] = [
   },
 ];
 
+/**
+ * Returns the hardcoded default categories.
+ * Used in legacy mode and as seed data for new instances.
+ */
 export function getCategories(): readonly VeilleCategory[] {
   return CATEGORIES;
+}
+
+/**
+ * Returns the default categories as a readonly reference for seeding instance DBs.
+ */
+export function getDefaultCategories(): readonly VeilleCategory[] {
+  return CATEGORIES;
+}
+
+interface DbCategoryRow {
+  id: string;
+  label: string;
+  keywords_en: string;
+  keywords_fr: string;
+  engines: string;
+  max_age_hours: number;
+  is_active: number;
+}
+
+/**
+ * Load active categories from an instance DB.
+ * Falls back to hardcoded defaults if the DB table is empty.
+ * Returns InstanceVeilleCategory[] (includes isActive field).
+ */
+export function getCategoriesFromDb(db: import('../core/database.js').SqliteDatabase): readonly import('../core/config.js').InstanceVeilleCategory[] {
+  const rows = db.prepare(
+    'SELECT id, label, keywords_en, keywords_fr, engines, max_age_hours, is_active FROM veille_categories WHERE is_active = 1 ORDER BY sort_order ASC',
+  ).all() as DbCategoryRow[];
+
+  if (rows.length === 0) {
+    // Convert hardcoded categories to InstanceVeilleCategory format
+    return CATEGORIES.map((cat) => ({ ...cat, isActive: true }));
+  }
+
+  return rows.map((row) => ({
+    id: row.id,
+    label: row.label,
+    keywords: {
+      en: JSON.parse(row.keywords_en) as string[],
+      fr: JSON.parse(row.keywords_fr) as string[],
+    },
+    engines: JSON.parse(row.engines) as string[],
+    maxAgeHours: row.max_age_hours,
+    isActive: row.is_active === 1,
+  }));
+}
+
+/**
+ * Seed the veille_categories table with default categories.
+ * Only inserts if the table is empty (first run).
+ */
+export function seedCategories(db: import('../core/database.js').SqliteDatabase): void {
+  const count = db.prepare('SELECT COUNT(*) AS cnt FROM veille_categories').get() as { cnt: number };
+
+  if (count.cnt > 0) {
+    return;
+  }
+
+  const insert = db.prepare(`
+    INSERT INTO veille_categories (id, label, keywords_en, keywords_fr, engines, max_age_hours, sort_order)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  const insertAll = db.transaction(() => {
+    for (let i = 0; i < CATEGORIES.length; i++) {
+      const cat = CATEGORIES[i];
+      if (cat === undefined) continue;
+      insert.run(
+        cat.id,
+        cat.label,
+        JSON.stringify(cat.keywords.en),
+        JSON.stringify(cat.keywords.fr),
+        JSON.stringify(cat.engines),
+        cat.maxAgeHours,
+        i,
+      );
+    }
+  });
+
+  insertAll();
 }
 
 export interface SearxngQuery {

@@ -3,19 +3,9 @@ import type { SqliteDatabase } from '../core/database.js';
 import { getLogger } from '../core/logger.js';
 import { getProfile } from '../feedback/preference-learner.js';
 import { recalculate } from '../feedback/preference-learner.js';
-import {
-  getWeeklyTotal,
-  getMonthlyTotal,
-} from '../budget/tracker.js';
-import {
-  weeklyReport as buildWeeklyReport,
-} from '../discord/message-builder.js';
-
-interface RapportDeps {
-  readonly db: SqliteDatabase;
-  readonly veilleChannel: TextChannel;
-  readonly adminChannel: TextChannel;
-}
+import { getWeeklyTotal, getMonthlyTotal } from '../budget/tracker.js';
+import { weeklyReport as buildWeeklyReportV2 } from '../discord/component-builder-v2.js';
+import type { InstanceContext } from '../registry/instance-context.js';
 
 interface WeekTopArticle {
   readonly title: string;
@@ -35,20 +25,20 @@ interface WeekPublication {
   readonly metrics_likes: number | null;
 }
 
-export async function handleWeeklyRapport(deps: RapportDeps): Promise<void> {
+async function runRapportPipeline(
+  db: SqliteDatabase,
+  veilleChannel: TextChannel,
+): Promise<void> {
   const logger = getLogger();
-  const { db, veilleChannel, adminChannel } = deps;
 
   logger.info('Generating weekly rapport');
 
-  // Recalculate preferences before rapport
   recalculate(db);
 
   const weekStart = new Date();
   weekStart.setDate(weekStart.getDate() - 7);
   const weekStartStr = weekStart.toISOString();
 
-  // ─── Top articles of the week ───
   const topArticles = db.prepare(`
     SELECT title, translated_title, score, source, url
     FROM veille_articles
@@ -57,7 +47,6 @@ export async function handleWeeklyRapport(deps: RapportDeps): Promise<void> {
     LIMIT 5
   `).all(weekStartStr) as WeekTopArticle[];
 
-  // ─── Week stats ───
   const articleStats = db.prepare(`
     SELECT
       COUNT(*) as total_collected,
@@ -97,7 +86,6 @@ export async function handleWeeklyRapport(deps: RapportDeps): Promise<void> {
     WHERE rated_at >= ?
   `).get(weekStartStr) as { total: number; positive: number; negative: number };
 
-  // ─── Publications this week ───
   const publications = db.prepare(`
     SELECT id, platform, content, scheduled_at, published_at, metrics_views, metrics_likes
     FROM publications
@@ -105,19 +93,16 @@ export async function handleWeeklyRapport(deps: RapportDeps): Promise<void> {
     ORDER BY created_at DESC
   `).all(weekStartStr) as WeekPublication[];
 
-  // ─── Budget ───
   const budgetWeekly = getWeeklyTotal(db);
   const budgetMonthly = getMonthlyTotal(db);
 
-  // ─── Preference profile highlights ───
   const profile = getProfile(db);
   const topPreferences = profile
     .filter((p) => p.totalCount >= 3)
     .sort((a, b) => Math.abs(b.score) - Math.abs(a.score))
     .slice(0, 5);
 
-  // ─── Build rapport ───
-  const payload = buildWeeklyReport({
+  const payload = buildWeeklyReportV2({
     topArticles: topArticles.map((a) => ({
       title: a.translated_title ?? a.title,
       score: a.score,
@@ -160,32 +145,27 @@ export async function handleWeeklyRapport(deps: RapportDeps): Promise<void> {
   });
 
   await veilleChannel.send({
-    embeds: payload.embeds,
-    components: payload.components,
+    components: payload.components as never[],
+    flags: payload.flags,
   });
 
-  // If there are publications without metrics, ask for them in #admin
-  const pubsWithoutMetrics = publications.filter(
-    (p) => p.metrics_views === null && p.published_at !== null,
-  );
-
-  if (pubsWithoutMetrics.length > 0) {
-    const lines = pubsWithoutMetrics.map((p) => {
-      const preview = p.content.slice(0, 60).replace(/\n/g, ' ');
-      return `• **#${String(p.id)}** (${p.platform}) : "${preview}..."`;
-    });
-
-    await adminChannel.send({
-      content: [
-        '📊 **Métriques manquantes** — ces publications n\'ont pas encore de stats :',
-        '',
-        ...lines,
-        '',
-        'Pour chaque post, envoie : `/metrics <id> vues=X likes=X commentaires=X partages=X saves=X`',
-        '(commande à venir — pour l\'instant, note les chiffres et on les ajoutera)',
-      ].join('\n'),
-    });
-  }
-
   logger.info('Weekly rapport sent');
+}
+
+// ─── V2: InstanceContext entry point ───
+
+export async function handleWeeklyRapportV2(ctx: InstanceContext): Promise<void> {
+  await runRapportPipeline(ctx.db, ctx.channels.veille);
+}
+
+// ─── Legacy entry point ───
+
+interface RapportDeps {
+  readonly db: SqliteDatabase;
+  readonly veilleChannel: TextChannel;
+  readonly adminChannel: TextChannel;
+}
+
+export async function handleWeeklyRapport(deps: RapportDeps): Promise<void> {
+  await runRapportPipeline(deps.db, deps.veilleChannel);
 }

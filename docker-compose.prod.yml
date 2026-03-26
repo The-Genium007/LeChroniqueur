@@ -1,0 +1,149 @@
+# docker-compose.prod.yml — Production self-hosted deployment
+# Includes: bot + SearXNG + Postiz + PostgreSQL + Redis + Docker socket proxy
+#
+# Install:
+#   curl -fsSL https://raw.githubusercontent.com/PowerGlove/LeChroniqueur/main/scripts/install.sh | bash
+#
+# Or manually:
+#   cp .env.production.example .env
+#   docker compose -f docker-compose.prod.yml up -d
+
+name: lechroniqueur
+
+services:
+
+  # ─── Le Chroniqueur (bot) ───
+  bot:
+    image: ghcr.io/powerglove/lechroniqueur:latest
+    container_name: lechroniqueur-bot
+    restart: unless-stopped
+    environment:
+      DISCORD_TOKEN: "${DISCORD_TOKEN}"
+      MASTER_ENCRYPTION_KEY: "${MASTER_ENCRYPTION_KEY}"
+      POSTIZ_URL: "${POSTIZ_URL}"
+      POSTIZ_INTERNAL_URL: "http://postiz:5000"
+      SEARXNG_URL: "http://searxng:8080"
+      NODE_ENV: "production"
+      LOG_LEVEL: "info"
+    volumes:
+      - bot_data:/app/data
+      - ./postiz-social.env:/app/postiz-env/postiz-social.env
+    depends_on:
+      searxng:
+        condition: service_started
+      postiz:
+        condition: service_healthy
+    networks:
+      - internal
+
+  # ─── SearXNG (search engine) ───
+  searxng:
+    image: searxng/searxng:latest
+    container_name: lechroniqueur-searxng
+    restart: unless-stopped
+    volumes:
+      - ./config/searxng:/etc/searxng:rw
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    networks:
+      - internal
+
+  # ─── Postiz (social media publishing) ───
+  postiz:
+    image: ghcr.io/gitroomhq/postiz-app:latest
+    container_name: lechroniqueur-postiz
+    restart: unless-stopped
+    depends_on:
+      postiz-db:
+        condition: service_healthy
+      postiz-redis:
+        condition: service_healthy
+    ports:
+      - "${POSTIZ_PORT:-4007}:5000"
+    environment:
+      DATABASE_URL: "postgresql://postiz:postiz@postiz-db:5432/postiz"
+      REDIS_URL: "redis://postiz-redis:6379"
+      JWT_SIGNING_KEY: "${POSTIZ_JWT_SIGNING_KEY}"
+      MAIN_URL: "${POSTIZ_URL}"
+      FRONTEND_URL: "${POSTIZ_URL}"
+      NEXT_PUBLIC_BACKEND_URL: "${POSTIZ_URL}/api"
+      BACKEND_INTERNAL_URL: "http://localhost:5000"
+      IS_GENERAL: "true"
+      RUN_CRON: "true"
+      STORAGE_PROVIDER: "local"
+      UPLOAD_DIRECTORY: "/uploads"
+      NEXT_PUBLIC_UPLOAD_DIRECTORY: "/uploads"
+      DISABLE_REGISTRATION: "false"
+    env_file:
+      - ./postiz-social.env
+    volumes:
+      - postiz_uploads:/uploads
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    networks:
+      - internal
+
+  # ─── PostgreSQL (Postiz database) ───
+  postiz-db:
+    image: postgres:17-alpine
+    container_name: lechroniqueur-postiz-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "postiz"
+      POSTGRES_DB: "postiz"
+      POSTGRES_HOST_AUTH_METHOD: "trust"
+    volumes:
+      - postiz_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postiz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - internal
+
+  # ─── Redis (Postiz cache) ───
+  postiz-redis:
+    image: redis:7.2-alpine
+    container_name: lechroniqueur-postiz-redis
+    restart: unless-stopped
+    volumes:
+      - postiz_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - internal
+
+  # ─── Docker Socket Proxy (for Postiz restart from bot) ───
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    container_name: lechroniqueur-docker-proxy
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1
+      POST: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - internal
+
+volumes:
+  bot_data:
+  postiz_uploads:
+  postiz_pgdata:
+  postiz_redis:
+
+networks:
+  internal:
+    driver: bridge

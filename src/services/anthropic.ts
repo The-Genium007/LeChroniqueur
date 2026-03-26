@@ -32,6 +32,13 @@ export async function complete(
 ): Promise<AnthropicResponse> {
   const config = getConfig();
   const logger = getLogger();
+
+  if (config.MOCK_APIS) {
+    const { mockCompleteResponse } = await import('../dev/fixtures.js');
+    logger.debug('MOCK Anthropic complete');
+    return { text: mockCompleteResponse(userMessage), tokensIn: 500, tokensOut: 200 };
+  }
+
   const client = getClient();
 
   logger.debug(
