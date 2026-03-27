@@ -49,18 +49,25 @@ function resultToArticle(
 
 function isWithinMaxAge(publishedDate: string | undefined, maxAgeHours: number): boolean {
   if (publishedDate === undefined) {
-    // If no date, assume it's recent enough
     return true;
   }
 
+  // SearXNG sometimes returns relative dates like "5 hours ago" or timestamps
   const published = new Date(publishedDate);
   if (isNaN(published.getTime())) {
+    // Unparseable date — assume recent
     return true;
   }
 
+  // Sanity check: if date is in the future or before 2000, it's garbage data
   const now = new Date();
+  if (published.getTime() > now.getTime() || published.getFullYear() < 2000) {
+    return true;
+  }
+
   const ageHours = (now.getTime() - published.getTime()) / (1000 * 60 * 60);
-  return ageHours <= maxAgeHours;
+  // Be generous: allow 2x the max age to avoid filtering too aggressively
+  return ageHours <= maxAgeHours * 2;
 }
 
 export async function collect(
@@ -81,15 +88,21 @@ export async function collect(
         const results = await searxngSearch(q.query, {
           engines: q.engines,
           language: q.language,
-          timeRange: category.maxAgeHours <= 72 ? 'day' : 'week',
+          timeRange: 'week',
         });
 
         totalFetched += results.length;
 
+        let filteredCount = 0;
         for (const result of results) {
           if (isWithinMaxAge(result.publishedDate, category.maxAgeHours)) {
             allArticles.push(resultToArticle(result, q.language, q.category));
+          } else {
+            filteredCount++;
           }
+        }
+        if (filteredCount > 0) {
+          logger.debug({ query: q.query, total: results.length, filtered: filteredCount }, 'Articles filtered by age');
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

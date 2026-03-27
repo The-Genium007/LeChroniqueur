@@ -10,8 +10,8 @@ const infraSchema = z.object({
   SEARXNG_URL: z.string().default('http://searxng:8080'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
   NODE_ENV: z.enum(['production', 'development', 'test']).default('production'),
-  DRY_RUN: z.coerce.boolean().default(false),
-  MOCK_APIS: z.coerce.boolean().default(false),
+  DRY_RUN: z.string().default('false').transform((v) => v === 'true' || v === '1'),
+  MOCK_APIS: z.string().default('false').transform((v) => v === 'true' || v === '1'),
 });
 
 export type InfraConfig = z.infer<typeof infraSchema>;
@@ -32,7 +32,7 @@ const legacySchema = z.object({
   CHANNEL_FEEDBACK: z.string().default(''),
 
   ANTHROPIC_API_KEY: z.string().default(''),
-  ANTHROPIC_MODEL: z.string().default('claude-sonnet-4-6-20250929'),
+  ANTHROPIC_MODEL: z.string().default('claude-sonnet-4-20250514'),
   GOOGLE_AI_API_KEY: z.string().default(''),
   POSTIZ_API_URL: z.string().default(''),
   POSTIZ_API_KEY: z.string().default(''),

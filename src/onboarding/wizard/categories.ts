@@ -57,11 +57,8 @@ export async function generateCategories(
   let categories: InstanceVeilleCategory[];
 
   try {
-    let jsonText = response.text.trim();
-    if (jsonText.startsWith('```json')) jsonText = jsonText.slice(7);
-    if (jsonText.startsWith('```')) jsonText = jsonText.slice(3);
-    if (jsonText.endsWith('```')) jsonText = jsonText.slice(0, -3);
-    jsonText = jsonText.trim();
+    const { extractJson } = await import('../../core/json-extractor.js');
+    const jsonText = extractJson(response.text);
 
     const parsed = JSON.parse(jsonText) as { categories: Array<{
       id: string;

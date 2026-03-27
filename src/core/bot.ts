@@ -1,6 +1,7 @@
 import {
   Client,
   GatewayIntentBits,
+  Partials,
 } from 'discord.js';
 import { getConfig } from './config.js';
 import { getLogger } from './logger.js';
@@ -10,8 +11,12 @@ export function createClient(): Client {
     intents: [
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.DirectMessages,
       GatewayIntentBits.MessageContent,
       GatewayIntentBits.GuildMessageTyping,
+    ],
+    partials: [
+      Partials.Channel, // Required to receive DM messages
     ],
   });
 }

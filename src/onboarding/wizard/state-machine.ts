@@ -228,6 +228,19 @@ export function recordIteration(session: WizardSession, tokensIn: number, tokens
   session.tokensUsed += tokensIn + tokensOut;
 }
 
+// ─── DM Message Tracking ───
+
+export function trackDmMessageId(session: WizardSession, messageId: string): void {
+  const data = session.data as Record<string, unknown>;
+  const ids = (data['_dmMessageIds'] as string[] | undefined) ?? [];
+  ids.push(messageId);
+  data['_dmMessageIds'] = ids;
+}
+
+export function getDmMessageIds(session: WizardSession): string[] {
+  return ((session.data as Record<string, unknown>)['_dmMessageIds'] as string[] | undefined) ?? [];
+}
+
 export function addToHistory(
   session: WizardSession,
   role: 'user' | 'assistant',

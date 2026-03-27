@@ -71,13 +71,19 @@ export function buildConfigPage(db: SqliteDatabase, instanceName: string): V2Mes
     ));
     c.addActionRowComponents(row(
       btn('dash:config:persona', 'Persona', ButtonStyle.Primary, '📝'),
+      btn('dash:config:apikeys', 'Clés API', ButtonStyle.Primary, '🔑'),
+      btn('dash:config:postiz', 'Postiz', ButtonStyle.Primary, '📤'),
       btn('dash:config:new_instance', 'Nouvelle instance', ButtonStyle.Success, '➕'),
     ));
     c.addActionRowComponents(row(
-      btn('dash:config:undo', 'Annuler dernier changement', ButtonStyle.Secondary, '↩️'),
-      btn('dash:config:reset', 'Reset aux défauts', ButtonStyle.Danger, '🔄'),
+      btn('dash:config:undo', 'Annuler', ButtonStyle.Secondary, '↩️'),
+      btn('dash:config:reset', 'Reset', ButtonStyle.Secondary, '🔄'),
       btn('dash:config:export', 'Export', ButtonStyle.Secondary, '📤'),
-      btn('dash:home', 'Retour', ButtonStyle.Secondary, '←'),
+      btn('dash:config:import', 'Import', ButtonStyle.Secondary, '📥'),
+    ));
+    c.addActionRowComponents(row(
+      btn('dash:config:delete', 'Supprimer l\'instance', ButtonStyle.Danger, '🗑️'),
+      btn('dash:home', 'Retour', ButtonStyle.Secondary, '◀️'),
     ));
   })]);
 }

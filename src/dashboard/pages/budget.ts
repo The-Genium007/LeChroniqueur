@@ -28,7 +28,7 @@ export function buildBudgetPage(db: SqliteDatabase, _instanceName: string): V2Me
     buildContainer(getColor('primary'), (c) => {
       c.addActionRowComponents(row(
         btn('dash:config:edit:budget', 'Modifier seuils', ButtonStyle.Primary, '✏️'),
-        btn('dash:home', 'Retour', ButtonStyle.Secondary, '←'),
+        btn('dash:home', 'Retour', ButtonStyle.Secondary, '◀️'),
       ));
     }),
   ]);

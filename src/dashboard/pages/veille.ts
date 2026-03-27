@@ -74,7 +74,7 @@ export function buildVeillePage(db: SqliteDatabase, instanceName: string): V2Mes
     ));
     c.addActionRowComponents(row(
       btn('dash:veille:categories', 'Modifier catégories', ButtonStyle.Secondary, '⚙️'),
-      btn('dash:home', 'Retour', ButtonStyle.Secondary, '←'),
+      btn('dash:home', 'Retour', ButtonStyle.Secondary, '◀️'),
     ));
   })]);
 }

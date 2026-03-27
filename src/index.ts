@@ -11,13 +11,13 @@ import { createClient, loginBot } from './core/bot.js';
 import { InstanceRegistry } from './registry/instance-registry.js';
 import { setupChannelRouter } from './registry/channel-router.js';
 import { handleGuildCreate } from './onboarding/welcome.js';
-import { ensureDashboardExists, refreshDashboard } from './dashboard/dashboard.js';
+import { ensureDashboardExists, refreshDashboard, cleanDashboardChannelOnBoot } from './dashboard/dashboard.js';
 import { cleanSearchChannelOnBoot, registerSearchChannel } from './dashboard/search.js';
 import { InstanceScheduler, applyCronOffset, type InstanceJob } from './core/scheduler-multi.js';
 import { checkHealth } from './core/health.js';
 import { checkForUpdate, CURRENT_VERSION } from './core/update-checker.js';
 import { requireInstanceOwner } from './discord/permissions.js';
-import { parseButtonCustomId } from './discord/interactions.js';
+import { parseButtonCustomId, autoDeleteReply, autoDeleteEditReply } from './discord/interactions.js';
 import { handleVeilleCronV2 } from './handlers/veille.js';
 import { handleSuggestionsCronV2 } from './handlers/suggestions.js';
 import { handleWeeklyRapportV2 } from './handlers/rapport.js';
@@ -41,7 +41,7 @@ async function main(): Promise<void> {
   const config = loadConfig();
   const logger = createLogger();
 
-  logger.info({ version: CURRENT_VERSION, env: config.NODE_ENV }, 'Starting Le Chroniqueur V2');
+  logger.info({ version: CURRENT_VERSION, env: config.NODE_ENV, dryRun: config.DRY_RUN, mockApis: config.MOCK_APIS }, 'Starting Le Chroniqueur V2');
 
   if (isLegacyMode()) {
     logger.info('Legacy mode detected (channel IDs in env). Please use: node dist/index.js');
@@ -67,8 +67,16 @@ async function main(): Promise<void> {
   for (const ctx of registry.getAll()) {
     if (ctx.status !== 'active') continue;
 
+    // Set API key in process.env so the Anthropic service can use it
+    if (ctx.secrets.anthropicApiKey.length > 0) {
+      process.env['ANTHROPIC_API_KEY'] = ctx.secrets.anthropicApiKey;
+    }
+
     try {
       const dashMsgId = registry.getChannelMessageId(ctx.id, 'dashboard');
+      if (dashMsgId !== null) {
+        await cleanDashboardChannelOnBoot(ctx.channels.dashboard, dashMsgId);
+      }
       await ensureDashboardExists(
         ctx.channels.dashboard, ctx.db, ctx.name, ctx.createdAt, false,
         dashMsgId,
@@ -78,7 +86,7 @@ async function main(): Promise<void> {
       const searchMsgId = registry.getChannelMessageId(ctx.id, 'recherche');
       if (searchMsgId !== null) {
         await cleanSearchChannelOnBoot(ctx.channels.recherche, searchMsgId);
-        registerSearchChannel(ctx.channels.recherche.id, searchMsgId);
+        registerSearchChannel(ctx.channels.recherche, searchMsgId);
       }
 
       const scheduler = startInstanceScheduler(ctx, registry);
@@ -135,7 +143,7 @@ async function main(): Promise<void> {
           const minScore = fields.getTextInputValue('min_score');
           if (perCycle.length > 0) saveOverride('suggestionsPerCycle', perCycle);
           if (minScore.length > 0) saveOverride('minScoreToPropose', minScore);
-          await interaction.reply({ content: '✅ Configuration suggestions mise à jour.', ephemeral: true });
+          await autoDeleteReply(interaction, '✅ Configuration suggestions mise à jour.');
         } else if (section === 'scheduler') {
           const veille = fields.getTextInputValue('veille_cron');
           const suggestions = fields.getTextInputValue('suggestions_cron');
@@ -143,7 +151,7 @@ async function main(): Promise<void> {
           if (veille.length > 0) saveOverride('veilleCron', veille);
           if (suggestions.length > 0) saveOverride('suggestionsCron', suggestions);
           if (rapport.length > 0) saveOverride('rapportCron', rapport);
-          await interaction.reply({ content: '✅ Scheduler mis à jour. Redémarre l\'instance pour appliquer les nouveaux crons.', ephemeral: true });
+          await autoDeleteReply(interaction, '✅ Scheduler mis à jour. Redémarre l\'instance pour appliquer les nouveaux crons.', 8_000);
         } else if (section === 'budget') {
           const daily = fields.getTextInputValue('daily_cents');
           const weekly = fields.getTextInputValue('weekly_cents');
@@ -151,12 +159,35 @@ async function main(): Promise<void> {
           if (daily.length > 0) saveOverride('dailyCents', daily);
           if (weekly.length > 0) saveOverride('weeklyCents', weekly);
           if (monthly.length > 0) saveOverride('monthlyCents', monthly);
-          await interaction.reply({ content: '✅ Budget mis à jour.', ephemeral: true });
+          await autoDeleteReply(interaction, '✅ Budget mis à jour.');
         } else if (section === 'persona') {
           const content = fields.getTextInputValue('persona_content');
           const { personaLoader: pl } = await import('./core/persona-loader.js');
           pl.saveForInstance(ctx.id, ctx.db, content);
-          await interaction.reply({ content: '✅ Persona mis à jour.', ephemeral: true });
+          await autoDeleteReply(interaction, '✅ Persona mis à jour.');
+        } else if (section === 'apikey:anthropic') {
+          const apiKey = fields.getTextInputValue('api_key');
+          await interaction.deferReply({ ephemeral: true });
+          const { validateAnthropicKey, storeInstanceSecret } = await import('./onboarding/api-keys.js');
+          const valid = await validateAnthropicKey(apiKey);
+          if (!valid) {
+            await interaction.editReply({ content: '❌ Clé Anthropic invalide. Vérifie et réessaie.' });
+          } else {
+            storeInstanceSecret(globalDb, ctx.id, 'anthropic', apiKey);
+            process.env['ANTHROPIC_API_KEY'] = apiKey;
+            await interaction.editReply({ content: '✅ Clé Anthropic mise à jour et validée.' });
+          }
+        } else if (section === 'apikey:google') {
+          const apiKey = fields.getTextInputValue('api_key');
+          await interaction.deferReply({ ephemeral: true });
+          const { validateGoogleAiKey, storeInstanceSecret } = await import('./onboarding/api-keys.js');
+          const valid = await validateGoogleAiKey(apiKey);
+          if (!valid) {
+            await interaction.editReply({ content: '❌ Clé Google AI invalide. Vérifie et réessaie.' });
+          } else {
+            storeInstanceSecret(globalDb, ctx.id, 'google_ai', apiKey);
+            await interaction.editReply({ content: '✅ Clé Google AI mise à jour et validée.' });
+          }
         }
         return;
       }
@@ -174,10 +205,10 @@ async function main(): Promise<void> {
       // Veille buttons
       if (action === 'thumbup') {
         upsertRating(ctx.db, parsed.targetTable, targetId, 1, interaction.user.id);
-        await interaction.reply({ content: '👍 Noté !', ephemeral: true });
+        await autoDeleteReply(interaction, '👍 Noté !');
       } else if (action === 'thumbdown') {
         upsertRating(ctx.db, parsed.targetTable, targetId, -1, interaction.user.id);
-        await interaction.reply({ content: '👎 Noté !', ephemeral: true });
+        await autoDeleteReply(interaction, '👎 Noté !');
       } else if (action === 'archive') {
         ctx.db.prepare('UPDATE veille_articles SET status = ? WHERE id = ?').run('archived', targetId);
         await interaction.update({ components: [] });
@@ -198,8 +229,8 @@ async function main(): Promise<void> {
           await interaction.editReply({ embeds: payload.embeds });
         }
       } else if (action === 'transform_accept') {
-        await interaction.reply({ content: '✅ Article marqué pour transformation.', ephemeral: true });
         ctx.db.prepare('UPDATE veille_articles SET status = ? WHERE id = ?').run('proposed', targetId);
+        await autoDeleteReply(interaction, '✅ Article marqué pour transformation.');
 
       // Suggestion buttons
       } else if (action === 'go') {
@@ -234,7 +265,7 @@ async function main(): Promise<void> {
         await interaction.update({ components: [] });
       } else if (action === 'later') {
         ctx.db.prepare("UPDATE suggestions SET status = ? WHERE id = ?").run('later', targetId);
-        await interaction.reply({ content: '⏰ Remis à plus tard.', ephemeral: true });
+        await autoDeleteReply(interaction, '⏰ Remis à plus tard.');
 
       // Production buttons
       } else if (action === 'validate') {
@@ -268,22 +299,22 @@ async function main(): Promise<void> {
             }
           }
 
-          await interaction.editReply({ content: '✅ Script validé. Kit de publication posté dans #publication.' });
+          await autoDeleteEditReply(interaction, '✅ Script validé. Kit de publication posté dans #publication.');
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
-          await interaction.editReply({ content: `⚠️ Erreur : ${msg}` });
+          await autoDeleteEditReply(interaction, `⚠️ Erreur : ${msg}`, 10_000);
         }
       } else if (action === 'retouch') {
         const suggestion = ctx.db.prepare('SELECT content FROM suggestions WHERE id = ?')
           .get(targetId) as { content: string } | undefined;
         if (suggestion !== undefined) {
           setPendingModification(interaction.user.id, targetId, suggestion.content);
-          await interaction.reply({ content: '✏️ Écris tes instructions de retouche. (expire dans 5 min)', ephemeral: true });
+          await autoDeleteReply(interaction, '✏️ Écris tes instructions de retouche. (expire dans 5 min)', 10_000);
         }
       } else if (action === 'select_image') {
         ctx.db.prepare("UPDATE media SET type = ? WHERE id = ?").run('image_selected', targetId);
         await interaction.update({ components: [] });
-        await interaction.followUp({ content: `🖼️ Variante sélectionnée.`, ephemeral: true });
+        await autoDeleteReply(interaction, '🖼️ Variante sélectionnée.');
 
       // Publication buttons
       } else if (action === 'pub') {
@@ -295,9 +326,9 @@ async function main(): Promise<void> {
           ctx.db.prepare("UPDATE publications SET status = 'published', published_at = datetime('now') WHERE suggestion_id = ?").run(targetId);
           await interaction.update({ components: [] });
         } else if (rawId.startsWith('pub:postpone:')) {
-          await interaction.reply({ content: '📅 Reporter la publication. Modifie la date dans le dashboard.', ephemeral: true });
+          await autoDeleteReply(interaction, '📅 Reporter la publication. Modifie la date dans le dashboard.', 8_000);
         } else {
-          await interaction.reply({ content: 'Action enregistrée.', ephemeral: true });
+          await autoDeleteReply(interaction, 'Action enregistrée.');
         }
 
       // Search buttons
@@ -322,7 +353,7 @@ async function main(): Promise<void> {
           if (interaction.channel !== null && interaction.channel.isTextBased()) {
             await clearSearchResults(interaction.channel as import('discord.js').TextChannel, interaction.channelId);
           }
-          await interaction.reply({ content: '🧹 Résultats effacés.', ephemeral: true });
+          await autoDeleteReply(interaction, '🧹 Résultats effacés.');
         } else if (rawId.startsWith('search:recent:')) {
           const type = rawId.split(':')[2] ?? 'articles';
           let results;
@@ -353,15 +384,15 @@ async function main(): Promise<void> {
           if (dashMsgId !== null) {
             await refreshDashboard(ctx.channels.dashboard, dashMsgId, ctx.db, ctx.name, ctx.createdAt, false);
           }
-          await interaction.editReply({ content: '✅ Veille lancée.' });
+          await autoDeleteEditReply(interaction, '✅ Veille lancée.');
         } else if (rawId === 'dash:veille:top') {
           const top = ctx.db.prepare("SELECT title, translated_title, score FROM veille_articles WHERE collected_at >= datetime('now', '-7 days') AND score >= 7 ORDER BY score DESC LIMIT 5").all() as Array<{ title: string; translated_title: string | null; score: number }>;
           const lines = top.map((a) => `► ${a.translated_title ?? a.title} (${String(a.score)}/10)`);
-          await interaction.reply({ content: lines.length > 0 ? `**📊 Top articles semaine :**\n${lines.join('\n')}` : 'Aucun article score ≥ 7 cette semaine.', ephemeral: true });
+          await autoDeleteReply(interaction, lines.length > 0 ? `**📊 Top articles semaine :**\n${lines.join('\n')}` : 'Aucun article score ≥ 7 cette semaine.', 15_000);
         } else if (rawId === 'dash:veille:categories') {
           const cats = ctx.db.prepare('SELECT label, is_active FROM veille_categories ORDER BY sort_order').all() as Array<{ label: string; is_active: number }>;
           const lines = cats.map((c) => `${c.is_active === 1 ? '✅' : '❌'} ${c.label}`);
-          await interaction.reply({ content: `**Catégories :**\n${lines.join('\n')}`, ephemeral: true });
+          await autoDeleteReply(interaction, `**Catégories :**\n${lines.join('\n')}`, 15_000);
         } else if (rawId === 'dash:suggestions:generate') {
           await interaction.deferReply({ ephemeral: true });
           await handleSuggestionsCronV2(ctx);
@@ -369,20 +400,20 @@ async function main(): Promise<void> {
           if (dashMsgId !== null) {
             await refreshDashboard(ctx.channels.dashboard, dashMsgId, ctx.db, ctx.name, ctx.createdAt, false);
           }
-          await interaction.editReply({ content: '✅ Suggestions générées.' });
+          await autoDeleteEditReply(interaction, '✅ Suggestions générées.');
         } else if (rawId === 'dash:suggestions:pending') {
           const pending = ctx.db.prepare("SELECT COUNT(*) AS cnt FROM suggestions WHERE status = 'pending'").get() as { cnt: number };
-          await interaction.reply({ content: `📋 ${String(pending.cnt)} suggestions en attente dans #idées.`, ephemeral: true });
+          await autoDeleteReply(interaction, `📋 ${String(pending.cnt)} suggestions en attente dans #idées.`, 8_000);
         } else if (rawId === 'dash:pause') {
           const newStatus = ctx.status === 'paused' ? 'active' : 'paused';
           globalDb.prepare('UPDATE instances SET status = ? WHERE id = ?').run(newStatus, ctx.id);
           if (newStatus === 'paused') {
             schedulers.get(ctx.id)?.stop();
-            await interaction.reply({ content: '⏸️ Instance en pause. Crons suspendus.', ephemeral: true });
+            await autoDeleteReply(interaction, '⏸️ Instance en pause. Crons suspendus.');
           } else {
             const scheduler = startInstanceScheduler(ctx, registry);
             schedulers.set(ctx.id, scheduler);
-            await interaction.reply({ content: '▶️ Instance reprise. Crons relancés.', ephemeral: true });
+            await autoDeleteReply(interaction, '▶️ Instance reprise. Crons relancés.');
           }
           const dashMsgId = registry.getChannelMessageId(ctx.id, 'dashboard');
           if (dashMsgId !== null) {
@@ -414,17 +445,17 @@ async function main(): Promise<void> {
         } else if (rawId === 'dash:config:undo') {
           const lastChange = ctx.db.prepare('SELECT key, old_value FROM config_history ORDER BY changed_at DESC LIMIT 1').get() as { key: string; old_value: string | null } | undefined;
           if (lastChange === undefined) {
-            await interaction.reply({ content: 'Aucun changement à annuler.', ephemeral: true });
+            await autoDeleteReply(interaction, 'Aucun changement à annuler.');
           } else if (lastChange.old_value === null) {
             ctx.db.prepare('DELETE FROM config_overrides WHERE key = ?').run(lastChange.key);
-            await interaction.reply({ content: `↩️ \`${lastChange.key}\` remis aux défauts.`, ephemeral: true });
+            await autoDeleteReply(interaction, `↩️ \`${lastChange.key}\` remis aux défauts.`);
           } else {
             ctx.db.prepare('UPDATE config_overrides SET value = ? WHERE key = ?').run(lastChange.old_value, lastChange.key);
-            await interaction.reply({ content: `↩️ \`${lastChange.key}\` = \`${lastChange.old_value}\``, ephemeral: true });
+            await autoDeleteReply(interaction, `↩️ \`${lastChange.key}\` = \`${lastChange.old_value}\``);
           }
         } else if (rawId === 'dash:config:reset') {
           ctx.db.prepare('DELETE FROM config_overrides').run();
-          await interaction.reply({ content: '🔄 Configuration remise aux défauts.', ephemeral: true });
+          await autoDeleteReply(interaction, '🔄 Configuration remise aux défauts.');
         } else if (rawId === 'dash:config:export') {
           await interaction.deferReply({ ephemeral: true });
           const persona = ctx.db.prepare('SELECT content FROM persona WHERE id = 1').get() as { content: string } | undefined;
@@ -457,7 +488,7 @@ async function main(): Promise<void> {
             );
           await interaction.showModal(modal);
         } else if (rawId === 'persona:upload') {
-          await interaction.reply({ content: '📎 Envoie un fichier `.md` dans ce channel. Le bot le détectera automatiquement.', ephemeral: true });
+          await autoDeleteReply(interaction, '📎 Envoie un fichier `.md` dans ce channel. Le bot le détectera automatiquement.', 10_000);
         } else if (rawId === 'dash:config:new_instance') {
           // Pre-store existing API keys in a new wizard session so user doesn't have to re-enter
           const { createWizardSession, saveWizardSession } = await import('./onboarding/wizard/state-machine.js');
@@ -479,6 +510,113 @@ async function main(): Promise<void> {
           })]);
           await interaction.reply({ components: payload.components as never[], flags: payload.flags, ephemeral: true } as never);
 
+        // ── API key rotation ──
+        } else if (rawId === 'dash:config:apikeys') {
+          const { buildContainer: bc3, txt: t3, sep: s3, btn: b3, row: r3, v2: v23, getColor: gc3, ButtonStyle: bs3 } = await import('./discord/component-builder-v2.js');
+          const apiPayload = v23([bc3(gc3('info'), (c3) => {
+            c3.addTextDisplayComponents(t3('## 🔑 Clés API\n\nModifie les clés API de cette instance.\nChaque clé sera validée avant d\'être enregistrée.'));
+            c3.addSeparatorComponents(s3());
+            c3.addActionRowComponents(r3(
+              b3('dash:config:apikey:anthropic', 'Clé Anthropic', bs3.Primary, '🔑'),
+              b3('dash:config:apikey:google', 'Clé Google AI', bs3.Primary, '🔑'),
+            ));
+          })]);
+          await interaction.reply({ components: apiPayload.components as never[], flags: apiPayload.flags, ephemeral: true } as never);
+        } else if (rawId === 'dash:config:apikey:anthropic') {
+          const apiModal = new ModalBuilder().setCustomId('config:modal:apikey:anthropic').setTitle('Modifier clé Anthropic')
+            .addComponents(
+              new ModalActionRow<TextInputBuilder>().addComponents(new TextInputBuilder().setCustomId('api_key').setLabel('Nouvelle clé API Anthropic (sk-ant-...)').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('sk-ant-api03-...')),
+            );
+          await interaction.showModal(apiModal);
+        } else if (rawId === 'dash:config:apikey:google') {
+          const apiModal = new ModalBuilder().setCustomId('config:modal:apikey:google').setTitle('Modifier clé Google AI')
+            .addComponents(
+              new ModalActionRow<TextInputBuilder>().addComponents(new TextInputBuilder().setCustomId('api_key').setLabel('Nouvelle clé API Google AI (AIza...)').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('AIza...')),
+            );
+          await interaction.showModal(apiModal);
+
+        // ── Postiz accounts ──
+        } else if (rawId === 'dash:config:postiz' || rawId === 'dash:config:postiz:refresh') {
+          await interaction.deferReply({ ephemeral: true });
+          try {
+            const { listIntegrations } = await import('./services/postiz.js');
+            const integrations = await listIntegrations();
+            const lines = integrations.length > 0
+              ? integrations.map((i: { name: string; identifier: string; disabled: boolean }) => `${i.disabled ? '❌' : '✅'} **${i.name}** (${i.identifier})`).join('\n')
+              : 'Aucun compte connecté.';
+            const postizUrl = process.env['POSTIZ_URL'] ?? 'http://localhost:5000';
+            const { buildContainer: bc4, txt: t4, sep: s4, btn: b4, row: r4, v2: v24, getColor: gc4, ButtonStyle: bs4 } = await import('./discord/component-builder-v2.js');
+            const postizPayload = v24([bc4(gc4('info'), (c4) => {
+              c4.addTextDisplayComponents(t4(`## 📤 Comptes Postiz\n\n${lines}\n\nPour ajouter ou supprimer des comptes, rendez-vous sur :\n${postizUrl}`));
+              c4.addSeparatorComponents(s4());
+              c4.addActionRowComponents(r4(
+                b4('dash:config:postiz:refresh', 'Rafraîchir', bs4.Secondary, '🔄'),
+              ));
+            })]);
+            await interaction.editReply({ components: postizPayload.components as never[] } as never);
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            await interaction.editReply({ content: `⚠️ Impossible de lister les comptes Postiz : ${msg}` });
+          }
+
+        // ── Delete instance ──
+        } else if (rawId === 'dash:config:delete') {
+          const { buildContainer: bc5, txt: t5, sep: s5, btn: b5, row: r5, v2: v25, getColor: gc5, ButtonStyle: bs5 } = await import('./discord/component-builder-v2.js');
+          const confirmPayload = v25([bc5(gc5('error'), (c5) => {
+            c5.addTextDisplayComponents(t5(`## 🗑️ Supprimer l'instance\n\n⚠️ **Cette action est irréversible.**\n\nTous les channels, données et configurations de **${ctx.name}** seront supprimés.`));
+            c5.addSeparatorComponents(s5());
+            c5.addActionRowComponents(r5(
+              b5('dash:config:delete:confirm', 'Confirmer la suppression', bs5.Danger, '🗑️'),
+              b5('dash:home', 'Annuler', bs5.Secondary, '◀️'),
+            ));
+          })]);
+          await interaction.reply({ components: confirmPayload.components as never[], flags: confirmPayload.flags, ephemeral: true } as never);
+        } else if (rawId === 'dash:config:delete:confirm') {
+          await interaction.deferReply({ ephemeral: true });
+          try {
+            // 1. Stop scheduler
+            schedulers.get(ctx.id)?.stop();
+            schedulers.delete(ctx.id);
+
+            // 2. Delete Discord channels + category
+            const guild = interaction.guild ?? await interaction.client.guilds.fetch(ctx.guildId);
+            const channelMap = ctx.channels as unknown as Record<string, import('discord.js').TextChannel | undefined>;
+            for (const channel of Object.values(channelMap)) {
+              if (channel !== undefined) {
+                try { await channel.delete(); } catch { /* already deleted */ }
+              }
+            }
+            // Delete the category
+            try {
+              const category = await guild.channels.fetch(ctx.categoryId);
+              if (category !== null) await category.delete();
+            } catch { /* category already deleted */ }
+
+            // 3. Clean global DB
+            globalDb.prepare('DELETE FROM instance_secrets WHERE instance_id = ?').run(ctx.id);
+            globalDb.prepare('DELETE FROM instance_channels WHERE instance_id = ?').run(ctx.id);
+            globalDb.prepare("UPDATE instances SET status = 'deleted' WHERE id = ?").run(ctx.id);
+
+            // 4. Close + delete instance DB
+            ctx.db.close();
+            const { rm } = await import('node:fs/promises');
+            await rm(`data/instances/${ctx.id}`, { recursive: true, force: true });
+
+            // 5. Unregister from memory
+            registry.unregister(ctx.id);
+
+            await interaction.editReply({ content: `✅ Instance **${ctx.name}** supprimée.` });
+            getLogger().info({ instanceId: ctx.id }, 'Instance deleted');
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            getLogger().error({ instanceId: ctx.id, error: msg }, 'Instance deletion failed');
+            await interaction.editReply({ content: `❌ Erreur lors de la suppression : ${msg}` });
+          }
+
+        // ── Import config ──
+        } else if (rawId === 'dash:config:import') {
+          await autoDeleteReply(interaction, '📎 Envoie le fichier JSON exporté en message dans ce channel. (expire dans 2 min)', 15_000);
+
         // ── Navigation pages (ephemeral, by parsed subAction) ──
         } else {
           const { buildVeillePage } = await import('./dashboard/pages/veille.js');
@@ -492,7 +630,7 @@ async function main(): Promise<void> {
             if (dashMsgId !== null) {
               await refreshDashboard(ctx.channels.dashboard, dashMsgId, ctx.db, ctx.name, ctx.createdAt, ctx.status === 'paused');
             }
-            await interaction.reply({ content: '🔄 Dashboard rafraîchi.', ephemeral: true });
+            await autoDeleteReply(interaction, '🔄 Dashboard rafraîchi.');
           } else if (subAction === 'veille') {
             const payload = buildVeillePage(ctx.db, ctx.name);
             await interaction.reply({ components: payload.components as never[], flags: payload.flags, ephemeral: true } as never);
@@ -512,6 +650,29 @@ async function main(): Promise<void> {
 
     // ─── Instance messages (text in instance channels) ───
     instanceMessage: async (message, ctx) => {
+      // Handle JSON import file in dashboard channel
+      if (message.channelId === ctx.channels.dashboard.id && message.author.id === ctx.ownerId) {
+        const attachment = message.attachments.find((a) => a.name?.endsWith('.json'));
+        if (attachment !== undefined) {
+          try {
+            const response = await fetch(attachment.url);
+            const content = await response.text();
+            const { parseImportFile, applyImportToInstance } = await import('./onboarding/import.js');
+            const importData = parseImportFile(content);
+            applyImportToInstance(ctx.id, ctx.db, importData);
+            const dashMsgId = registry.getChannelMessageId(ctx.id, 'dashboard');
+            if (dashMsgId !== null) {
+              await refreshDashboard(ctx.channels.dashboard, dashMsgId, ctx.db, ctx.name, ctx.createdAt, ctx.status === 'paused');
+            }
+            await message.reply({ content: `✅ Configuration importée : ${String(importData.categories.length)} catégories, ${String(importData.configOverrides.length)} overrides, persona ${importData.persona.length > 0 ? 'mis à jour' : 'inchangé'}.` });
+            try { await message.delete(); } catch { /* can't delete */ }
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            await message.reply({ content: `❌ Import échoué : ${msg}` });
+          }
+          return;
+        }
+      }
       await handleAdminMessageV2(message, ctx);
     },
 
@@ -534,6 +695,58 @@ async function main(): Promise<void> {
 
       const session = getActiveWizardSession(globalDb, row.guild_id, message.author.id);
       if (session === undefined) return;
+
+      // Restore API key from session (survives hot-reload)
+      const storedKey = (session.data as Record<string, unknown>)['_anthropicKey'];
+      if (typeof storedKey === 'string' && storedKey.length > 0) {
+        process.env['ANTHROPIC_API_KEY'] = storedKey;
+      }
+
+      // Handle JSON file import in import mode
+      const isImportMode = (session.data as Record<string, unknown>)['_importMode'] === true;
+      if (isImportMode && session.step === 'describe_project') {
+        const attachment = message.attachments.find((a) => a.name?.endsWith('.json'));
+        if (attachment !== undefined) {
+          try {
+            const response = await fetch(attachment.url);
+            const content = await response.text();
+            const { parseImportFile } = await import('./onboarding/import.js');
+            const importData = parseImportFile(content);
+            // Store import data in session for use during confirm
+            (session.data as Record<string, unknown>)['_importData'] = importData;
+            session.data.instanceName = importData.instanceName;
+            session.data.projectName = importData.instanceName;
+            saveWizardSession(globalDb, session);
+
+            const { buildContainer: bc, txt: t, sep: s, btn: b, row: r, v2: v, getColor: gc, ButtonStyle: bs } = await import('./discord/component-builder-v2.js');
+            const confirmPayload = v([bc(gc('success'), (c) => {
+              c.addTextDisplayComponents(t([
+                '## ✅ Configuration chargée',
+                '',
+                `**Instance** : ${importData.instanceName}`,
+                `**Catégories** : ${String(importData.categories.length)}`,
+                `**Config overrides** : ${String(importData.configOverrides.length)}`,
+                `**Persona** : ${importData.persona.length > 0 ? `${String(importData.persona.length)} chars` : 'non défini'}`,
+                '',
+                'Prêt à créer l\'instance avec cette configuration ?',
+              ].join('\n')));
+              c.addSeparatorComponents(s());
+              c.addActionRowComponents(r(
+                b('wizard:confirm', 'Créer l\'instance', bs.Success, '🚀'),
+                b('wizard:cancel', 'Annuler', bs.Danger, '✖️'),
+              ));
+            })]);
+            await message.reply({ components: confirmPayload.components as never[], flags: confirmPayload.flags } as never);
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            await message.reply({ content: `❌ Fichier invalide : ${msg}` });
+          }
+          return;
+        }
+        // If no attachment, tell the user to send a file
+        await message.reply({ content: '📎 Envoie un fichier `.json` exporté depuis le dashboard.' });
+        return;
+      }
 
       // Only handle text in steps that expect free text
       if (session.step === 'describe_project') {

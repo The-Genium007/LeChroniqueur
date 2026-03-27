@@ -94,16 +94,24 @@ export class InstanceRegistry {
 
   private async resolveChannels(records: InstanceChannelRecord[]): Promise<InstanceChannelMap> {
     const resolved: Record<string, TextChannel> = {};
+    const logger = getLogger();
 
     for (const rec of records) {
       try {
-        const channel = await this.client.channels.fetch(rec.channelId);
-        if (channel !== null && channel.type === DiscordChannelType.GuildText) {
-          resolved[rec.channelType] = channel as TextChannel;
+        const channel = await this.client.channels.fetch(rec.channel_id);
+        if (channel === null) {
+          logger.warn({ channelType: rec.channel_type, channelId: rec.channel_id }, 'Channel fetch returned null');
+          continue;
         }
-      } catch {
-        // Channel may have been deleted
-        getLogger().warn({ channelType: rec.channelType, channelId: rec.channelId }, 'Channel not found');
+        if (channel.type !== DiscordChannelType.GuildText) {
+          logger.warn({ channelType: rec.channel_type, channelId: rec.channel_id, actualType: channel.type }, 'Channel is not GuildText');
+          continue;
+        }
+        resolved[rec.channel_type] = channel as TextChannel;
+        logger.debug({ channelType: rec.channel_type, channelId: rec.channel_id }, 'Channel resolved');
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        logger.warn({ channelType: rec.channel_type, channelId: rec.channel_id, error: msg }, 'Channel not found');
       }
     }
 
@@ -132,7 +140,7 @@ export class InstanceRegistry {
 
     return {
       anthropicApiKey: secrets['anthropic'] ?? '',
-      anthropicModel: secrets['anthropic_model'] ?? 'claude-sonnet-4-6-20250929',
+      anthropicModel: secrets['anthropic_model'] ?? 'claude-sonnet-4-20250514',
       googleAiApiKey: secrets['google_ai'],
       postizApiUrl: secrets['postiz_url'],
       postizApiKey: secrets['postiz_api_key'],
@@ -204,7 +212,18 @@ export class InstanceRegistry {
 
   resolveFromInteraction(interaction: Interaction): InstanceContext | undefined {
     if (interaction.channelId === null) return undefined;
-    return this.resolveFromChannel(interaction.channelId);
+
+    // Direct channel match
+    const direct = this.resolveFromChannel(interaction.channelId);
+    if (direct !== undefined) return direct;
+
+    // Thread support: if the interaction is in a thread, check the parent channel
+    const channel = interaction.channel;
+    if (channel !== null && 'parentId' in channel && channel.parentId !== null) {
+      return this.resolveFromChannel(channel.parentId);
+    }
+
+    return undefined;
   }
 
   // ─── CRUD ───
@@ -212,6 +231,19 @@ export class InstanceRegistry {
   register(ctx: InstanceContext): void {
     this.instances.set(ctx.id, ctx);
     this.indexChannels(ctx);
+  }
+
+  unregister(id: string): void {
+    const ctx = this.instances.get(id);
+    if (ctx !== undefined) {
+      const channelMap = ctx.channels as unknown as Record<string, TextChannel | undefined>;
+      for (const channel of Object.values(channelMap)) {
+        if (channel !== undefined) {
+          this.channelIndex.delete(channel.id);
+        }
+      }
+      this.instances.delete(id);
+    }
   }
 
   get(id: string): InstanceContext | undefined {

@@ -16,14 +16,20 @@ export interface CompletionOptions {
 let _client: Anthropic | undefined;
 
 function getClient(): Anthropic {
-  if (_client !== undefined) {
+  // Check if the API key changed (e.g. set during wizard onboarding)
+  const config = getConfig();
+  const currentKey = process.env['ANTHROPIC_API_KEY'] ?? config.ANTHROPIC_API_KEY;
+
+  if (_client !== undefined && _lastKey === currentKey) {
     return _client;
   }
 
-  const config = getConfig();
-  _client = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY });
+  _client = new Anthropic({ apiKey: currentKey });
+  _lastKey = currentKey;
   return _client;
 }
+
+let _lastKey: string | undefined;
 
 export async function complete(
   systemPrompt: string,
@@ -46,32 +52,54 @@ export async function complete(
     'Anthropic API call',
   );
 
-  const message = await client.messages.create({
-    model: config.ANTHROPIC_MODEL,
-    max_tokens: options?.maxTokens ?? 2048,
-    temperature: options?.temperature ?? 0.7,
-    system: systemPrompt,
-    messages: [{ role: 'user', content: userMessage }],
-  });
+  const maxRetries = 3;
+  let lastError: unknown;
 
-  const textBlocks = message.content.filter(
-    (block): block is Anthropic.TextBlock => block.type === 'text',
-  );
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const message = await client.messages.create({
+        model: config.ANTHROPIC_MODEL,
+        max_tokens: options?.maxTokens ?? 2048,
+        temperature: options?.temperature ?? 0.7,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userMessage }],
+      });
 
-  const text = textBlocks.map((block) => block.text).join('');
+      const textBlocks = message.content.filter(
+        (block): block is Anthropic.TextBlock => block.type === 'text',
+      );
 
-  const result: AnthropicResponse = {
-    text,
-    tokensIn: message.usage.input_tokens,
-    tokensOut: message.usage.output_tokens,
-  };
+      const text = textBlocks.map((block) => block.text).join('');
 
-  logger.debug(
-    { tokensIn: result.tokensIn, tokensOut: result.tokensOut },
-    'Anthropic response received',
-  );
+      const result: AnthropicResponse = {
+        text,
+        tokensIn: message.usage.input_tokens,
+        tokensOut: message.usage.output_tokens,
+      };
 
-  return result;
+      logger.debug(
+        { tokensIn: result.tokensIn, tokensOut: result.tokensOut },
+        'Anthropic response received',
+      );
+
+      return result;
+    } catch (error) {
+      lastError = error;
+      const msg = error instanceof Error ? error.message : String(error);
+      const isOverloaded = msg.includes('529') || msg.includes('overloaded') || msg.includes('529');
+
+      if (isOverloaded && attempt < maxRetries) {
+        const delayMs = attempt * 3000;
+        logger.warn({ attempt, maxRetries, delayMs }, 'Anthropic overloaded, retrying');
+        await new Promise((resolve) => { setTimeout(resolve, delayMs); });
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  throw lastError;
 }
 
 export async function completeWithSearch(

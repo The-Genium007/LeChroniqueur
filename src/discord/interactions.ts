@@ -2,9 +2,45 @@ import type {
   Interaction,
   ChatInputCommandInteraction,
   ButtonInteraction,
+  ModalSubmitInteraction,
 } from 'discord.js';
 import { getLogger } from '../core/logger.js';
 import { requireOwner } from './permissions.js';
+
+const DEFAULT_AUTO_DELETE_MS = 5_000;
+
+/**
+ * Reply with an ephemeral message that auto-deletes after a delay.
+ * Useful for short status confirmations ("✅ Done", "👍 Noté !").
+ */
+export async function autoDeleteReply(
+  interaction: ButtonInteraction | ModalSubmitInteraction,
+  content: string,
+  delayMs: number = DEFAULT_AUTO_DELETE_MS,
+): Promise<void> {
+  if (interaction.replied || interaction.deferred) {
+    await interaction.followUp({ content, ephemeral: true });
+  } else {
+    await interaction.reply({ content, ephemeral: true });
+  }
+  setTimeout(() => {
+    interaction.deleteReply().catch(() => { /* already deleted or expired */ });
+  }, delayMs);
+}
+
+/**
+ * For deferred replies: edit the reply then auto-delete after a delay.
+ */
+export async function autoDeleteEditReply(
+  interaction: ButtonInteraction | ModalSubmitInteraction,
+  content: string,
+  delayMs: number = DEFAULT_AUTO_DELETE_MS,
+): Promise<void> {
+  await interaction.editReply({ content });
+  setTimeout(() => {
+    interaction.deleteReply().catch(() => { /* already deleted or expired */ });
+  }, delayMs);
+}
 
 export interface ButtonAction {
   readonly action: string;

@@ -66,15 +66,14 @@ export async function processDescription(
   let analysis: { instanceName: string; niche: string; language: string; platforms: string[] };
 
   try {
-    let jsonText = response.text.trim();
-    if (jsonText.startsWith('```json')) jsonText = jsonText.slice(7);
-    if (jsonText.startsWith('```')) jsonText = jsonText.slice(3);
-    if (jsonText.endsWith('```')) jsonText = jsonText.slice(0, -3);
-    jsonText = jsonText.trim();
+    const { extractJson } = await import('../../core/json-extractor.js');
+    logger.debug({ rawResponse: response.text.slice(0, 500) }, 'Claude describe response');
+    const jsonText = extractJson(response.text);
 
     analysis = JSON.parse(jsonText) as typeof analysis;
-  } catch {
-    logger.warn('Failed to parse Claude analysis, using defaults');
+  } catch (error) {
+    const parseError = error instanceof Error ? error.message : String(error);
+    logger.warn({ parseError, rawText: response.text.slice(0, 300) }, 'Failed to parse Claude analysis, using defaults');
     analysis = {
       instanceName: 'mon-projet',
       niche: 'contenu digital',
@@ -83,13 +82,14 @@ export async function processDescription(
     };
   }
 
-  // Store in session
+  // Store in session — guard against missing fields
+  const instanceName = analysis.instanceName ?? 'mon-projet';
   session.data.projectDescription = description;
-  session.data.projectName = analysis.instanceName;
-  session.data.projectNiche = analysis.niche;
-  session.data.projectLanguage = analysis.language;
-  session.data.projectPlatforms = analysis.platforms;
-  session.data.instanceName = analysis.instanceName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+  session.data.projectName = instanceName;
+  session.data.projectNiche = analysis.niche ?? 'contenu digital';
+  session.data.projectLanguage = analysis.language ?? 'fr';
+  session.data.projectPlatforms = analysis.platforms ?? ['tiktok', 'instagram'];
+  session.data.instanceName = instanceName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
 
   addToHistory(session, 'assistant', response.text);
 

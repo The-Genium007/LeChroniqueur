@@ -34,6 +34,7 @@ export async function handleGuildCreate(guild: Guild): Promise<void> {
       c.addSeparatorComponents(sep());
       c.addActionRowComponents(row(
         btn('onboard:start', 'Créer ma première instance', ButtonStyle.Success, '🚀'),
+        btn('onboard:import', 'Importer une configuration', ButtonStyle.Secondary, '📥'),
       ));
     })]);
 
@@ -61,6 +62,7 @@ export async function handleGuildCreate(guild: Guild): Promise<void> {
           c.addSeparatorComponents(sep());
           c.addActionRowComponents(row(
             btn('onboard:start', 'Commencer l\'onboarding', ButtonStyle.Success, '🚀'),
+            btn('onboard:import', 'Importer', ButtonStyle.Secondary, '📥'),
           ));
         })]);
 

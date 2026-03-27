@@ -16,6 +16,8 @@ import {
   advanceStep,
   goToStep,
   canIterate,
+  trackDmMessageId,
+  getDmMessageIds,
   type WizardSession,
 } from './state-machine.js';
 import { buildDescribePrompt } from './describe.js';
@@ -34,6 +36,41 @@ import {
   ButtonStyle,
 } from '../../discord/component-builder-v2.js';
 import type { InstanceRegistry } from '../../registry/instance-registry.js';
+
+/**
+ * Send a V2 message as a DM. Interaction replies don't support V2 containers,
+ * so we send via user.send() and acknowledge the interaction separately.
+ * If a session is provided, the message ID is tracked for later cleanup.
+ */
+async function sendWizardDM(
+  interaction: ButtonInteraction | ModalSubmitInteraction,
+  payload: { components: unknown[]; flags: number },
+  session?: WizardSession,
+): Promise<void> {
+  const msg = await interaction.user.send({
+    components: payload.components as never[],
+    flags: payload.flags,
+  });
+  if (session !== undefined) {
+    trackDmMessageId(session, msg.id);
+  }
+  // Acknowledge the interaction silently — ignore if expired
+  if (!interaction.replied && !interaction.deferred) {
+    try { await interaction.deferUpdate(); } catch { /* interaction expired */ }
+  }
+}
+
+/**
+ * Delete all tracked DM messages from a wizard session.
+ */
+async function cleanupWizardDMs(user: import('discord.js').User, session: WizardSession): Promise<void> {
+  const messageIds = getDmMessageIds(session);
+  if (messageIds.length === 0) return;
+  const dmChannel = await user.createDM();
+  await Promise.allSettled(
+    messageIds.map((id) => dmChannel.messages.delete(id).catch(() => {})),
+  );
+}
 
 /**
  * Handle all onboarding/wizard interactions (buttons + modals in DMs).
@@ -55,17 +92,28 @@ export async function handleWizardInteraction(
 
   // ─── onboard:start — begin the wizard ───
   if (customId === 'onboard:start') {
-    const guildId = interaction.guildId ?? interaction.message?.guildId ?? null;
+    let guildId = interaction.guildId ?? interaction.message?.guildId ?? null;
+
+    // In DMs, find the guild where this user is owner and the bot is present
+    if (guildId === null && interaction.client !== undefined) {
+      const userGuild = interaction.client.guilds.cache.find(
+        (g) => g.ownerId === interaction.user.id,
+      );
+      if (userGuild !== undefined) {
+        guildId = userGuild.id;
+      }
+    }
+
     if (guildId === null) {
-      await interaction.reply({ content: '❌ Cette commande doit être utilisée depuis un serveur.', ephemeral: true });
+      await interaction.reply({ content: '❌ Impossible de trouver ton serveur. Ajoute le bot à un serveur dont tu es propriétaire.', ephemeral: true });
       return;
     }
 
     let session = getActiveWizardSession(globalDb, guildId, interaction.user.id);
     if (session !== undefined) {
-      // Resume existing session
       const payload = buildResumePrompt(session);
-      await interaction.reply({ components: payload.components as never[], flags: payload.flags, ephemeral: true } as never);
+      await sendWizardDM(interaction, payload, session);
+      saveWizardSession(globalDb, session);
       return;
     }
 
@@ -75,6 +123,27 @@ export async function handleWizardInteraction(
     // Start with API key collection (Modal)
     const modal = buildAnthropicKeyModal();
     await interaction.showModal(modal);
+    return;
+  }
+
+  // ─── onboard:import — import flow ───
+  if (customId === 'onboard:import') {
+    let guildId = interaction.guildId ?? interaction.message?.guildId ?? null;
+    if (guildId === null && interaction.client !== undefined) {
+      const userGuild = interaction.client.guilds.cache.find(
+        (g) => g.ownerId === interaction.user.id,
+      );
+      if (userGuild !== undefined) guildId = userGuild.id;
+    }
+    if (guildId === null) {
+      await interaction.reply({ content: '❌ Impossible de trouver ton serveur.', ephemeral: true });
+      return;
+    }
+    const session = createWizardSession(globalDb, guildId, interaction.user.id);
+    (session.data as Record<string, unknown>)['_importMode'] = true;
+    saveWizardSession(globalDb, session);
+    // Start with API key collection same as normal
+    await interaction.showModal(buildAnthropicKeyModal());
     return;
   }
 
@@ -116,7 +185,13 @@ export async function handleWizardInteraction(
           btn('onboard:postiz:done', 'Continuer', ButtonStyle.Success, '✅'),
         ));
       })]);
-      await interaction.editReply({ components: payload.components as never[] });
+      const verifyMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+      const verifySession = findSessionForUser(globalDb, interaction);
+      if (verifySession !== undefined) {
+        trackDmMessageId(verifySession, verifyMsg.id);
+        saveWizardSession(globalDb, verifySession);
+      }
+      try { await interaction.editReply({ content: '✅' }); interaction.deleteReply().catch(() => {}); } catch { /* interaction expired */ }
       return;
     }
     if (sub === 'done') {
@@ -166,8 +241,24 @@ export async function handleWizardInteraction(
   } else if (customId === 'wizard:confirm') {
     await handleWizardConfirm(interaction, session, globalDb, registry);
   } else if (customId === 'wizard:cancel') {
+    await cleanupWizardDMs(interaction.user, session);
     deleteWizardSession(globalDb, session.id);
-    await interaction.reply({ content: '❌ Onboarding annulé.', ephemeral: true });
+    // Send a fresh welcome message so the user can restart cleanly
+    const restartPayload = v2([buildContainer(getColor('primary'), (c) => {
+      c.addTextDisplayComponents(txt([
+        '## 🔄 Onboarding réinitialisé',
+        '',
+        'Tu peux relancer l\'onboarding quand tu veux.',
+      ].join('\n')));
+      c.addSeparatorComponents(sep());
+      c.addActionRowComponents(row(
+        btn('onboard:start', 'Recommencer', ButtonStyle.Success, '🚀'),
+      ));
+    })]);
+    await interaction.user.send({ components: restartPayload.components as never[], flags: restartPayload.flags });
+    if (!interaction.replied && !interaction.deferred) {
+      try { await interaction.deferUpdate(); } catch { /* expired */ }
+    }
   } else if (customId.startsWith('wizard:tone:')) {
     const tone = customId.split(':')[2] ?? 'sarcastic';
     setTone(session, tone);
@@ -175,13 +266,14 @@ export async function handleWizardInteraction(
     advanceStep(session);
     saveWizardSession(globalDb, session);
     const payload = await generatePersonaSection(session, 'identity');
-    await interaction.reply({ components: payload.components as never[], flags: payload.flags, ephemeral: true } as never);
+    await sendWizardDM(interaction, payload, session);
+    saveWizardSession(globalDb, session);
   } else if (customId.startsWith('wizard:platform:')) {
     const platform = customId.split(':')[2] ?? '';
     togglePlatform(session, platform);
     saveWizardSession(globalDb, session);
     const payload = buildPlatformSelection(session);
-    await interaction.update({ components: payload.components as never[] });
+    try { await interaction.update({ components: payload.components as never[] }); } catch { /* expired */ }
   }
 }
 
@@ -238,25 +330,24 @@ async function handleModalSubmit(
       return;
     }
 
+    // Make the key available to the Anthropic service for wizard API calls
+    process.env['ANTHROPIC_API_KEY'] = apiKey;
+
     // Store temporarily — will be persisted to instance on confirm
     const session = findSessionForUser(globalDb, interaction);
     if (session !== undefined) {
-      // Store in session data for now
       (session.data as Record<string, unknown>)['_anthropicKey'] = apiKey;
       saveWizardSession(globalDb, session);
     }
 
-    // Ask for Google AI key
-    const payload = v2([buildContainer(getColor('success'), (c) => {
-      c.addTextDisplayComponents(txt('## ✅ Clé Anthropic validée\n\nMaintenant, la clé Google AI (optionnel — pour la génération d\'images et vidéos).'));
-      c.addSeparatorComponents(sep());
-      c.addActionRowComponents(row(
+    // Ask for Google AI key — use plain content + ActionRow (ephemeral doesn't support V2 containers)
+    await interaction.editReply({
+      content: '✅ **Clé Anthropic validée !**\n\nMaintenant, la clé Google AI (optionnel — pour la génération d\'images et vidéos).',
+      components: [row(
         btn('onboard:key:google', 'Entrer clé Google AI', ButtonStyle.Primary, '🔑'),
         btn('onboard:skip:google', 'Plus tard', ButtonStyle.Secondary, '⏭️'),
-      ));
-    })]);
-
-    await interaction.editReply({ components: payload.components as never[] });
+      )],
+    });
     return;
   }
 
@@ -285,7 +376,7 @@ async function handleModalSubmit(
 
 async function advanceToPostiz(
   interaction: ButtonInteraction | ModalSubmitInteraction,
-  _globalDb: SqliteDatabase,
+  globalDb: SqliteDatabase,
 ): Promise<void> {
   const { getAvailablePlatforms, PLATFORM_CONFIG } = await import('../postiz-setup.js');
   const available = getAvailablePlatforms();
@@ -314,10 +405,14 @@ async function advanceToPostiz(
     ));
   })]);
 
+  const session = findSessionForUser(globalDb, interaction);
   if (interaction.replied || interaction.deferred) {
-    await interaction.editReply({ components: payload.components as never[] });
+    const msg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+    if (session !== undefined) { trackDmMessageId(session, msg.id); saveWizardSession(globalDb, session); }
+    try { await interaction.editReply({ content: '✅' }); interaction.deleteReply().catch(() => {}); } catch { /* interaction expired */ }
   } else {
-    await interaction.reply({ components: payload.components as never[], flags: payload.flags, ephemeral: true } as never);
+    await sendWizardDM(interaction, payload, session);
+    if (session !== undefined) saveWizardSession(globalDb, session);
   }
 }
 
@@ -328,15 +423,44 @@ async function advanceToDescribe(
   const session = findSessionForUser(globalDb, interaction);
   if (session === undefined) return;
 
+  // Import mode — ask for JSON file instead of wizard
+  const isImportMode = (session.data as Record<string, unknown>)['_importMode'] === true;
+  if (isImportMode) {
+    const importPayload = v2([buildContainer(getColor('info'), (c) => {
+      c.addTextDisplayComponents(txt([
+        '## 📥 Import de configuration',
+        '',
+        'Envoie le fichier JSON exporté en message dans cette conversation.',
+        'Le fichier doit provenir d\'un export depuis le dashboard.',
+      ].join('\n')));
+    })]);
+    if (interaction.replied || interaction.deferred) {
+      const msg = await interaction.user.send({ components: importPayload.components as never[], flags: importPayload.flags });
+      trackDmMessageId(session, msg.id);
+      session.step = 'describe_project'; // park at this step, waiting for file
+      saveWizardSession(globalDb, session);
+      try { await interaction.editReply({ content: '✅' }); interaction.deleteReply().catch(() => {}); } catch { /* expired */ }
+    } else {
+      await sendWizardDM(interaction, importPayload, session);
+      session.step = 'describe_project';
+      saveWizardSession(globalDb, session);
+    }
+    return;
+  }
+
   session.step = 'describe_project';
   saveWizardSession(globalDb, session);
 
   const payload = buildDescribePrompt(session);
 
   if (interaction.replied || interaction.deferred) {
-    await interaction.editReply({ components: payload.components as never[] });
+    const msg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+    trackDmMessageId(session, msg.id);
+    saveWizardSession(globalDb, session);
+    try { await interaction.editReply({ content: '✅' }); interaction.deleteReply().catch(() => {}); } catch { /* interaction expired */ }
   } else {
-    await interaction.reply({ components: payload.components as never[], flags: payload.flags, ephemeral: true } as never);
+    await sendWizardDM(interaction, payload, session);
+    saveWizardSession(globalDb, session);
   }
 }
 
@@ -359,53 +483,74 @@ async function handleWizardNext(
     return;
   }
 
-  await interaction.deferReply({ ephemeral: true });
+  try { await interaction.deferReply({ ephemeral: true }); } catch { /* interaction expired */ }
 
   let payload;
 
-  switch (nextStep) {
-    case 'review_categories':
-      ({ message: payload } = await generateCategories(session));
-      break;
-    case 'dryrun_searxng':
-      payload = await dryRunCategories(session);
-      break;
-    case 'choose_persona_tone':
-      payload = buildToneSelection(session);
-      break;
-    case 'review_persona_identity':
-      payload = await generatePersonaSection(session, 'identity');
-      break;
-    case 'review_persona_tone':
-      payload = await generatePersonaSection(session, 'tone');
-      break;
-    case 'review_persona_vocabulary':
-      payload = await generatePersonaSection(session, 'vocabulary');
-      break;
-    case 'review_persona_art_direction':
-      payload = await generatePersonaSection(session, 'art_direction');
-      break;
-    case 'review_persona_examples':
-      payload = await generatePersonaSection(session, 'examples');
-      break;
-    case 'configure_platforms':
-      payload = buildPlatformSelection(session);
-      break;
-    case 'configure_schedule':
-      payload = buildScheduleConfig(session);
-      break;
-    case 'confirm':
-      assemblePersona(session);
-      payload = buildConfirmation(session);
-      break;
-    default:
-      payload = v2([buildContainer(getColor('info'), (c) => {
-        c.addTextDisplayComponents(txt(`Étape ${nextStep} en cours...`));
-      })]);
+  try {
+    switch (nextStep) {
+      case 'review_categories':
+      case 'refine_categories':
+        ({ message: payload } = await generateCategories(session));
+        break;
+      case 'dryrun_searxng':
+        payload = await dryRunCategories(session);
+        break;
+      case 'choose_persona_tone':
+        payload = buildToneSelection(session);
+        break;
+      case 'review_persona_identity':
+        payload = await generatePersonaSection(session, 'identity');
+        break;
+      case 'review_persona_tone':
+        payload = await generatePersonaSection(session, 'tone');
+        break;
+      case 'review_persona_vocabulary':
+        payload = await generatePersonaSection(session, 'vocabulary');
+        break;
+      case 'review_persona_art_direction':
+        payload = await generatePersonaSection(session, 'art_direction');
+        break;
+      case 'review_persona_examples':
+        payload = await generatePersonaSection(session, 'examples');
+        break;
+      case 'configure_platforms':
+        payload = buildPlatformSelection(session);
+        break;
+      case 'configure_schedule':
+        payload = buildScheduleConfig(session);
+        break;
+      case 'confirm':
+        assemblePersona(session);
+        payload = buildConfirmation(session);
+        break;
+      default:
+        payload = v2([buildContainer(getColor('info'), (c) => {
+          c.addTextDisplayComponents(txt(`Étape ${nextStep} en cours...`));
+        })]);
+    }
+  } catch (error) {
+    const logger = getLogger();
+    const msg = error instanceof Error ? error.message : String(error);
+    logger.error({ error: msg, step: nextStep }, 'Wizard step generation failed');
+    payload = v2([buildContainer(getColor('error'), (c) => {
+      c.addTextDisplayComponents(txt(`## ⚠️ Erreur\nLa génération a échoué : ${msg.slice(0, 200)}\n\nRéessaie ou passe à l'étape suivante.`));
+      c.addSeparatorComponents(sep());
+      c.addActionRowComponents(row(
+        btn('wizard:redo', 'Réessayer', ButtonStyle.Primary, '🔄'),
+        btn('wizard:next', 'Passer', ButtonStyle.Secondary, '⏭️'),
+      ));
+    })]);
   }
 
   saveWizardSession(globalDb, session);
-  await interaction.editReply({ components: payload.components as never[] });
+  try {
+    const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+    trackDmMessageId(session, sentMsg.id);
+    saveWizardSession(globalDb, session);
+    await interaction.editReply({ content: '✅' });
+    interaction.deleteReply().catch(() => {});
+  } catch { /* interaction expired — DM sent anyway */ }
 }
 
 async function handleWizardRedo(
@@ -418,35 +563,55 @@ async function handleWizardRedo(
     return;
   }
 
-  await interaction.deferReply({ ephemeral: true });
+  try { await interaction.deferReply({ ephemeral: true }); } catch { /* interaction expired */ }
 
   // Re-run the current step
   let payload;
   const step = session.step;
 
-  if (step === 'review_categories' || step === 'refine_categories') {
-    ({ message: payload } = await generateCategories(session));
-  } else if (step === 'dryrun_searxng') {
-    payload = await dryRunCategories(session);
-  } else if (step.startsWith('review_persona_')) {
-    const sectionMap: Record<string, 'identity' | 'tone' | 'vocabulary' | 'art_direction' | 'examples'> = {
-      review_persona_identity: 'identity',
-      review_persona_tone: 'tone',
-      review_persona_vocabulary: 'vocabulary',
-      review_persona_art_direction: 'art_direction',
-      review_persona_examples: 'examples',
-    };
-    const section = sectionMap[step];
-    if (section !== undefined) {
-      payload = await generatePersonaSection(session, section);
+  try {
+    if (step === 'review_categories' || step === 'refine_categories') {
+      ({ message: payload } = await generateCategories(session));
+    } else if (step === 'dryrun_searxng') {
+      payload = await dryRunCategories(session);
+    } else if (step.startsWith('review_persona_')) {
+      const sectionMap: Record<string, 'identity' | 'tone' | 'vocabulary' | 'art_direction' | 'examples'> = {
+        review_persona_identity: 'identity',
+        review_persona_tone: 'tone',
+        review_persona_vocabulary: 'vocabulary',
+        review_persona_art_direction: 'art_direction',
+        review_persona_examples: 'examples',
+      };
+      const section = sectionMap[step];
+      if (section !== undefined) {
+        payload = await generatePersonaSection(session, section);
+      }
     }
+  } catch (error) {
+    const logger = getLogger();
+    const msg = error instanceof Error ? error.message : String(error);
+    logger.error({ error: msg, step }, 'Wizard redo generation failed');
+    payload = v2([buildContainer(getColor('error'), (c) => {
+      c.addTextDisplayComponents(txt(`## ⚠️ Erreur\nLa régénération a échoué : ${msg.slice(0, 200)}\n\nRéessaie ou passe à l'étape suivante.`));
+      c.addSeparatorComponents(sep());
+      c.addActionRowComponents(row(
+        btn('wizard:redo', 'Réessayer', ButtonStyle.Primary, '🔄'),
+        btn('wizard:next', 'Passer', ButtonStyle.Secondary, '⏭️'),
+      ));
+    })]);
   }
 
   if (payload !== undefined) {
     saveWizardSession(globalDb, session);
-    await interaction.editReply({ components: payload.components as never[] });
+    try {
+      const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+      trackDmMessageId(session, sentMsg.id);
+      saveWizardSession(globalDb, session);
+      await interaction.editReply({ content: '✅' });
+      interaction.deleteReply().catch(() => {});
+    } catch { /* interaction expired */ }
   } else {
-    await interaction.editReply({ content: 'Régénération non disponible pour cette étape.' });
+    try { await interaction.editReply({ content: 'Régénération non disponible pour cette étape.' }); } catch { /* expired */ }
   }
 }
 
@@ -459,9 +624,15 @@ async function handleWizardBack(
   goToStep(session, 'review_categories');
   saveWizardSession(globalDb, session);
 
-  await interaction.deferReply({ ephemeral: true });
+  try { await interaction.deferReply({ ephemeral: true }); } catch { /* expired */ }
   const { message: payload } = await generateCategories(session);
-  await interaction.editReply({ components: payload.components as never[] });
+  try {
+    const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+    trackDmMessageId(session, sentMsg.id);
+    saveWizardSession(globalDb, session);
+    await interaction.editReply({ content: '✅' });
+    interaction.deleteReply().catch(() => {});
+  } catch { /* interaction expired */ }
 }
 
 async function handleWizardConfirm(
@@ -472,18 +643,23 @@ async function handleWizardConfirm(
 ): Promise<void> {
   const logger = getLogger();
 
-  await interaction.deferReply({ ephemeral: true });
+  try { await interaction.deferReply({ ephemeral: true }); } catch { /* expired */ }
 
-  const guild = interaction.guild;
+  // In DMs, guild is null — fetch it from the session's guildId
+  let guild = interaction.guild;
   if (guild === null) {
-    await interaction.editReply({ content: '❌ Cette action doit être effectuée depuis un serveur.' });
-    return;
+    try {
+      guild = await interaction.client.guilds.fetch(session.guildId);
+    } catch {
+      try { await interaction.editReply({ content: '❌ Impossible de trouver le serveur. Vérifie que le bot est toujours membre.' }); } catch { /* expired */ }
+      return;
+    }
   }
 
   // 1. Validate infrastructure
   const errors = await validateInfrastructure(guild);
   if (errors.length > 0) {
-    await interaction.editReply({ content: `❌ Impossible de créer l'instance :\n${errors.join('\n')}` });
+    try { await interaction.editReply({ content: `❌ Impossible de créer l'instance :\n${errors.join('\n')}` }); } catch { /* expired */ }
     return;
   }
 
@@ -492,7 +668,7 @@ async function handleWizardConfirm(
 
   try {
     // 2. Create Discord channels
-    await interaction.editReply({ content: '🏗️ Création des channels Discord...' });
+    try { await interaction.editReply({ content: '🏗️ Création des channels Discord...' }); } catch { /* expired */ }
     const infra = await createInfrastructure(guild, instanceName, interaction.user.id);
 
     // 3. Register instance in global DB
@@ -515,38 +691,47 @@ async function handleWizardConfirm(
     }
 
     // 5. Create instance DB + seed data
-    await interaction.editReply({ content: '💾 Initialisation de la base de données...' });
+    try { await interaction.editReply({ content: '💾 Initialisation de la base de données...' }); } catch { /* expired */ }
     const instanceDb = createInstanceDatabase(instanceId);
 
-    // Seed categories
-    if (session.data.categories !== undefined && session.data.categories.length > 0) {
-      const insert = instanceDb.prepare(`
-        INSERT INTO veille_categories (id, label, keywords_en, keywords_fr, engines, max_age_hours, sort_order)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `);
-      const cats = session.data.categories;
-      const insertAll = instanceDb.transaction(() => {
-        if (cats === undefined) return;
-        for (let i = 0; i < cats.length; i++) {
-          const cat = cats[i];
-          if (cat === undefined) continue;
-          insert.run(cat.id, cat.label, JSON.stringify(cat.keywords.en), JSON.stringify(cat.keywords.fr), JSON.stringify(cat.engines), cat.maxAgeHours, i);
-        }
-      });
-      insertAll();
-    } else {
-      seedCategories(instanceDb);
-    }
+    // Check if import mode with pre-loaded data
+    const importData = (session.data as Record<string, unknown>)['_importData'] as import('../import.js').ImportData | undefined;
 
-    // Save persona
-    if (session.data.personaFull !== undefined) {
-      instanceDb.prepare(`
-        INSERT INTO persona (id, content, updated_at) VALUES (1, ?, datetime('now'))
-      `).run(session.data.personaFull);
+    if (importData !== undefined) {
+      // Import mode — use applyImportToInstance for categories, overrides, and persona
+      const { applyImportToInstance } = await import('../import.js');
+      applyImportToInstance(instanceId, instanceDb, importData);
+    } else {
+      // Normal wizard mode — seed categories from wizard data
+      if (session.data.categories !== undefined && session.data.categories.length > 0) {
+        const insert = instanceDb.prepare(`
+          INSERT INTO veille_categories (id, label, keywords_en, keywords_fr, engines, max_age_hours, sort_order)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `);
+        const cats = session.data.categories;
+        const insertAll = instanceDb.transaction(() => {
+          if (cats === undefined) return;
+          for (let i = 0; i < cats.length; i++) {
+            const cat = cats[i];
+            if (cat === undefined) continue;
+            insert.run(cat.id, cat.label, JSON.stringify(cat.keywords.en), JSON.stringify(cat.keywords.fr), JSON.stringify(cat.engines), cat.maxAgeHours, i);
+          }
+        });
+        insertAll();
+      } else {
+        seedCategories(instanceDb);
+      }
+
+      // Save persona from wizard
+      if (session.data.personaFull !== undefined) {
+        instanceDb.prepare(`
+          INSERT INTO persona (id, content, updated_at) VALUES (1, ?, datetime('now'))
+        `).run(session.data.personaFull);
+      }
     }
 
     // 6. Post dashboard + search interface
-    await interaction.editReply({ content: '📊 Création du dashboard...' });
+    try { await interaction.editReply({ content: '📊 Création du dashboard...' }); } catch { /* expired */ }
 
     const dashChannel = await guild.channels.fetch(infra.channels.dashboard);
     const searchChannel = await guild.channels.fetch(infra.channels.recherche);
@@ -573,7 +758,8 @@ async function handleWizardConfirm(
     // 7. Reload registry
     await registry.loadAll();
 
-    // 8. Clean up wizard session
+    // 8. Clean up wizard session + DMs
+    await cleanupWizardDMs(interaction.user, session);
     deleteWizardSession(globalDb, session.id);
 
     // 9. Done
@@ -595,34 +781,51 @@ async function handleWizardConfirm(
       ].join('\n')));
     })]);
 
-    await interaction.editReply({ components: donePayload.components as never[] });
+    try {
+      await interaction.user.send({ components: donePayload.components as never[], flags: donePayload.flags });
+      await interaction.editReply({ content: '✅ Instance créée !' });
+      setTimeout(() => { interaction.deleteReply().catch(() => {}); }, 5_000);
+    } catch { /* expired */ }
 
     logger.info({ instanceId, guildId: guild.id, name: instanceName }, 'Instance created successfully');
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     logger.error({ error: msg }, 'Instance creation failed');
-    await interaction.editReply({ content: `❌ Erreur lors de la création : ${msg}` });
+    try { await interaction.editReply({ content: `❌ Erreur lors de la création : ${msg}` }); } catch { /* expired */ }
   }
 }
 
 // ─── Helpers ───
 
 function findSessionForUser(globalDb: SqliteDatabase, interaction: Interaction): WizardSession | undefined {
+  let session: WizardSession | undefined;
+
   // Try to find a session for this user across all guilds
   const guildId = interaction.guildId ?? '';
   if (guildId.length > 0) {
-    return getActiveWizardSession(globalDb, guildId, interaction.user.id);
+    session = getActiveWizardSession(globalDb, guildId, interaction.user.id);
+  } else {
+    // DM context — search all sessions for this user
+    const row = globalDb.prepare(`
+      SELECT guild_id FROM wizard_sessions
+      WHERE user_id = ? AND expires_at > datetime('now')
+      ORDER BY created_at DESC LIMIT 1
+    `).get(interaction.user.id) as { guild_id: string } | undefined;
+
+    if (row !== undefined) {
+      session = getActiveWizardSession(globalDb, row.guild_id, interaction.user.id);
+    }
   }
 
-  // DM context — search all sessions for this user
-  const row = globalDb.prepare(`
-    SELECT guild_id FROM wizard_sessions
-    WHERE user_id = ? AND expires_at > datetime('now')
-    ORDER BY created_at DESC LIMIT 1
-  `).get(interaction.user.id) as { guild_id: string } | undefined;
+  // Restore API key to process.env if session has one (survives hot-reload)
+  if (session !== undefined) {
+    const storedKey = (session.data as Record<string, unknown>)['_anthropicKey'];
+    if (typeof storedKey === 'string' && storedKey.length > 0) {
+      process.env['ANTHROPIC_API_KEY'] = storedKey;
+    }
+  }
 
-  if (row === undefined) return undefined;
-  return getActiveWizardSession(globalDb, row.guild_id, interaction.user.id);
+  return session;
 }
 
 function buildResumePrompt(session: WizardSession): ReturnType<typeof v2> {

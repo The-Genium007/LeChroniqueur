@@ -115,13 +115,23 @@ async function runVeillePipeline(
       publishedDate: a.article.publishedDate,
     }));
 
+  logger.info({ topCount: topArticles.length, totalAnalyzed: sortedArticles.length }, 'Sending veille digest');
+
   const digestPayload = veilleDigest(topArticles, stats);
-  const digestMessage = await veilleChannel.send({
-    embeds: digestPayload.embeds,
-    components: digestPayload.components,
-  });
+  let digestMessage;
+  try {
+    digestMessage = await veilleChannel.send({
+      embeds: digestPayload.embeds,
+      components: digestPayload.components,
+    });
+  } catch (sendError) {
+    const msg = sendError instanceof Error ? sendError.message : String(sendError);
+    logger.error({ error: msg }, 'Failed to send veille digest');
+    return;
+  }
 
   const threadArticles = sortedArticles.filter((a) => a.article.score >= 5);
+  logger.info({ threadArticleCount: threadArticles.length }, 'Creating veille thread');
 
   if (threadArticles.length > 0) {
     const thread = await digestMessage.startThread({
@@ -130,24 +140,29 @@ async function runVeillePipeline(
     });
 
     for (const { article, id } of threadArticles) {
-      const articlePayload = veilleArticle({
-        id,
-        title: article.title,
-        translatedTitle: article.translatedTitle,
-        suggestedAngle: article.suggestedAngle,
-        source: article.source,
-        url: article.url,
-        score: article.score,
-        publishedDate: article.publishedDate,
-      });
+      try {
+        const articlePayload = veilleArticle({
+          id,
+          title: article.title,
+          translatedTitle: article.translatedTitle,
+          suggestedAngle: article.suggestedAngle,
+          source: article.source,
+          url: article.url,
+          score: article.score,
+          publishedDate: article.publishedDate,
+        });
 
-      const articleMsg = await thread.send({
-        embeds: articlePayload.embeds,
-        components: articlePayload.components,
-      });
+        const articleMsg = await thread.send({
+          embeds: articlePayload.embeds,
+          components: articlePayload.components,
+        });
 
-      db.prepare('UPDATE veille_articles SET discord_message_id = ?, discord_thread_id = ? WHERE id = ?')
-        .run(articleMsg.id, thread.id, id);
+        db.prepare('UPDATE veille_articles SET discord_message_id = ?, discord_thread_id = ? WHERE id = ?')
+          .run(articleMsg.id, thread.id, id);
+      } catch (articleError) {
+        const msg = articleError instanceof Error ? articleError.message : String(articleError);
+        logger.warn({ error: msg, articleId: id }, 'Failed to send article to thread, skipping');
+      }
     }
   }
 

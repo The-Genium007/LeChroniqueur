@@ -57,7 +57,7 @@ export function buildContentPage(db: SqliteDatabase, instanceName: string): V2Me
       btn('dash:suggestions:pending', 'Voir en attente', ButtonStyle.Secondary, '📋'),
     ));
     c.addActionRowComponents(row(
-      btn('dash:home', 'Retour', ButtonStyle.Secondary, '←'),
+      btn('dash:home', 'Retour', ButtonStyle.Secondary, '◀️'),
     ));
   })]);
 }

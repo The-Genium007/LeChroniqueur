@@ -6,7 +6,7 @@ import {
   ButtonStyle,
 } from '../discord/component-builder-v2.js';
 
-const SEARCH_CLEANUP_TIMEOUT_MS = 12 * 60 * 60 * 1000; // 12 hours
+const SEARCH_CLEANUP_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes
 
 // ─── Search Interface (permanent message) ───
 
@@ -28,6 +28,7 @@ export function buildSearchInterface(instanceName: string): V2MessagePayload {
 interface SearchSession {
   readonly channelId: string;
   readonly permanentMessageId: string;
+  readonly channel: TextChannel;
   tempMessageIds: string[];
   timeoutHandle: ReturnType<typeof setTimeout> | null;
 }
@@ -35,12 +36,13 @@ interface SearchSession {
 const sessions = new Map<string, SearchSession>(); // channelId → session
 
 export function registerSearchChannel(
-  channelId: string,
+  channel: TextChannel,
   permanentMessageId: string,
 ): void {
-  sessions.set(channelId, {
-    channelId,
+  sessions.set(channel.id, {
+    channelId: channel.id,
     permanentMessageId,
+    channel,
     tempMessageIds: [],
     timeoutHandle: null,
   });
@@ -67,18 +69,18 @@ function resetCleanupTimeout(session: SearchSession): void {
 async function cleanupSession(session: SearchSession): Promise<void> {
   const logger = getLogger();
 
-  for (const msgId of session.tempMessageIds) {
-    try {
-      // We need the channel to delete messages — this will be called from
-      // the interaction handler which has access to the channel
-      logger.debug({ msgId, channelId: session.channelId }, 'Search cleanup: message marked for deletion');
-    } catch {
-      // Message already deleted
-    }
-  }
-
+  const toDelete = [...session.tempMessageIds];
   session.tempMessageIds = [];
   session.timeoutHandle = null;
+
+  for (const msgId of toDelete) {
+    try {
+      const msg = await session.channel.messages.fetch(msgId);
+      await msg.delete();
+    } catch {
+      logger.debug({ msgId, channelId: session.channelId }, 'Search cleanup: message already deleted');
+    }
+  }
 }
 
 /**

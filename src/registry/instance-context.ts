@@ -43,10 +43,10 @@ export interface InstanceContext {
 }
 
 export interface InstanceChannelRecord {
-  readonly instanceId: string;
-  readonly channelType: string;
-  readonly channelId: string;
-  readonly messageId: string | null;
+  readonly instance_id: string;
+  readonly channel_type: string;
+  readonly channel_id: string;
+  readonly message_id: string | null;
 }
 
 export interface InstanceRecord {

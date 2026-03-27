@@ -46,7 +46,7 @@ export function buildConfirmation(session: WizardSession): V2MessagePayload {
     c.addSeparatorComponents(sep());
     c.addActionRowComponents(row(
       btn('wizard:confirm', 'Créer l\'instance', ButtonStyle.Success, '🚀'),
-      btn('wizard:back', 'Revenir en arrière', ButtonStyle.Secondary, '←'),
+      btn('wizard:back', 'Revenir en arrière', ButtonStyle.Secondary, '◀️'),
       btn('wizard:cancel', 'Annuler', ButtonStyle.Danger, '✖️'),
     ));
   })]);
