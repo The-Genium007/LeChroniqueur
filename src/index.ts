@@ -573,12 +573,27 @@ async function main(): Promise<void> {
           await interaction.reply({ components: confirmPayload.components as never[], flags: confirmPayload.flags, ephemeral: true } as never);
         } else if (rawId === 'dash:config:delete:confirm') {
           await interaction.deferReply({ ephemeral: true });
+          const deletedName = ctx.name;
+          const ownerId = ctx.ownerId;
           try {
             // 1. Stop scheduler
             schedulers.get(ctx.id)?.stop();
             schedulers.delete(ctx.id);
 
-            // 2. Delete Discord channels + category
+            // 2. Clean global DB BEFORE deleting channels (so channelDelete events don't trigger errors)
+            globalDb.prepare('DELETE FROM instance_secrets WHERE instance_id = ?').run(ctx.id);
+            globalDb.prepare('DELETE FROM instance_channels WHERE instance_id = ?').run(ctx.id);
+            globalDb.prepare("UPDATE instances SET status = 'deleted' WHERE id = ?").run(ctx.id);
+
+            // 3. Unregister from memory (stops routing events to this instance)
+            registry.unregister(ctx.id);
+
+            // 4. Close + delete instance DB
+            ctx.db.close();
+            const { rm } = await import('node:fs/promises');
+            await rm(`data/instances/${ctx.id}`, { recursive: true, force: true });
+
+            // 5. Delete Discord channels + category (do this LAST since it kills our interaction context)
             const guild = interaction.guild ?? await interaction.client.guilds.fetch(ctx.guildId);
             const channelMap = ctx.channels as unknown as Record<string, import('discord.js').TextChannel | undefined>;
             for (const channel of Object.values(channelMap)) {
@@ -586,31 +601,47 @@ async function main(): Promise<void> {
                 try { await channel.delete(); } catch { /* already deleted */ }
               }
             }
-            // Delete the category
             try {
               const category = await guild.channels.fetch(ctx.categoryId);
               if (category !== null) await category.delete();
             } catch { /* category already deleted */ }
 
-            // 3. Clean global DB
-            globalDb.prepare('DELETE FROM instance_secrets WHERE instance_id = ?').run(ctx.id);
-            globalDb.prepare('DELETE FROM instance_channels WHERE instance_id = ?').run(ctx.id);
-            globalDb.prepare("UPDATE instances SET status = 'deleted' WHERE id = ?").run(ctx.id);
+            // 6. Send DM to owner + cleanup old bot DMs in DM channel
+            try {
+              const owner = await interaction.client.users.fetch(ownerId);
+              const dmChannel = await owner.createDM();
+              // Delete old bot messages in DM (cleanup)
+              try {
+                const messages = await dmChannel.messages.fetch({ limit: 50 });
+                const botMessages = messages.filter((m) => m.author.id === interaction.client.user?.id);
+                await Promise.allSettled(botMessages.map((m) => m.delete().catch(() => {})));
+              } catch { /* can't fetch DMs */ }
 
-            // 4. Close + delete instance DB
-            ctx.db.close();
-            const { rm } = await import('node:fs/promises');
-            await rm(`data/instances/${ctx.id}`, { recursive: true, force: true });
+              const { buildContainer: bcDm, txt: tDm, sep: sDm, btn: bDm, row: rDm, v2: vDm, getColor: gcDm, ButtonStyle: bsDm } = await import('./discord/component-builder-v2.js');
+              const dmPayload = vDm([bcDm(gcDm('success'), (c) => {
+                c.addTextDisplayComponents(tDm([
+                  `## ✅ Instance **${deletedName}** supprimée`,
+                  '',
+                  'Tous les channels et données ont été nettoyés.',
+                  '',
+                  'Tu peux créer une nouvelle instance à tout moment.',
+                ].join('\n')));
+                c.addSeparatorComponents(sDm());
+                c.addActionRowComponents(rDm(
+                  bDm('onboard:start', 'Créer une nouvelle instance', bsDm.Success, '🚀'),
+                  bDm('onboard:import', 'Importer une configuration', bsDm.Secondary, '📥'),
+                ));
+              })]);
+              await owner.send({ components: dmPayload.components as never[], flags: dmPayload.flags });
+            } catch { /* DMs disabled */ }
 
-            // 5. Unregister from memory
-            registry.unregister(ctx.id);
-
-            await interaction.editReply({ content: `✅ Instance **${ctx.name}** supprimée.` });
+            // editReply will fail since the channel is deleted — that's expected
+            try { await interaction.editReply({ content: '✅' }); } catch { /* channel deleted */ }
             getLogger().info({ instanceId: ctx.id }, 'Instance deleted');
           } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
             getLogger().error({ instanceId: ctx.id, error: msg }, 'Instance deletion failed');
-            await interaction.editReply({ content: `❌ Erreur lors de la suppression : ${msg}` });
+            try { await interaction.editReply({ content: `❌ Erreur lors de la suppression : ${msg}` }); } catch { /* channel may be deleted */ }
           }
 
         // ── Import config ──
