@@ -47,6 +47,10 @@ function buildCommands(): SlashCommandBuilder[] {
       .addStringOption((option) =>
         option.setName('value').setDescription('Nouvelle valeur').setRequired(true),
       ) as SlashCommandBuilder,
+
+    new SlashCommandBuilder()
+      .setName('setup')
+      .setDescription('Reçois un DM pour configurer ou créer une instance'),
   ];
 }
 

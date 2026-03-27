@@ -17,7 +17,6 @@ import {
   goToStep,
   canIterate,
   trackDmMessageId,
-  getDmMessageIds,
   type WizardSession,
 } from './state-machine.js';
 import { buildDescribePrompt } from './describe.js';
@@ -72,15 +71,45 @@ async function sendWizardDM(
 }
 
 /**
- * Delete all tracked DM messages from a wizard session.
+ * Delete ALL bot messages in the DM channel by paginating through the entire history.
+ * Discord only allows the bot to delete its own messages in DMs.
  */
-async function cleanupWizardDMs(user: import('discord.js').User, session: WizardSession): Promise<void> {
-  const messageIds = getDmMessageIds(session);
-  if (messageIds.length === 0) return;
-  const dmChannel = await user.createDM();
-  await Promise.allSettled(
-    messageIds.map((id) => dmChannel.messages.delete(id).catch(() => {})),
-  );
+async function cleanupWizardDMs(user: import('discord.js').User, _session: WizardSession): Promise<void> {
+  try {
+    const dmChannel = await user.createDM();
+    const botId = user.client.user?.id;
+    if (botId === undefined) return;
+
+    let lastId: string | undefined;
+    let totalDeleted = 0;
+
+    // Paginate through all messages in the DM channel
+    for (let page = 0; page < 10; page++) {
+      const fetchOptions: { limit: number; before?: string } = { limit: 100 };
+      if (lastId !== undefined) fetchOptions.before = lastId;
+
+      const messages = await dmChannel.messages.fetch(fetchOptions);
+      if (messages.size === 0) break;
+
+      const botMessages = messages.filter((m) => m.author.id === botId);
+      if (botMessages.size > 0) {
+        await Promise.allSettled(botMessages.map((m) => m.delete().catch(() => {})));
+        totalDeleted += botMessages.size;
+      }
+
+      // Move cursor to oldest message in this batch
+      const oldest = messages.last();
+      if (oldest === undefined || messages.size < 100) break;
+      lastId = oldest.id;
+    }
+
+    if (totalDeleted > 0) {
+      getLogger().debug({ userId: user.id, deleted: totalDeleted }, 'Cleaned up wizard DMs');
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    getLogger().warn({ userId: user.id, error: msg }, 'Failed to cleanup wizard DMs');
+  }
 }
 
 /**
@@ -91,6 +120,37 @@ export async function handleWizardInteraction(
   globalDb: SqliteDatabase,
   registry: InstanceRegistry,
 ): Promise<void> {
+  // ─── /setup slash command ───
+  if (interaction.isChatInputCommand() && interaction.commandName === 'setup') {
+    const instances = registry.getByGuild(interaction.guildId ?? '');
+    const hasInstances = instances.length > 0;
+
+    const payload = v2([buildContainer(getColor('primary'), (c) => {
+      c.addTextDisplayComponents(txt([
+        '# 🔧 Setup — Le Chroniqueur',
+        '',
+        hasInstances
+          ? `Tu as **${String(instances.length)}** instance(s) sur ce serveur.\nUtilise le dashboard dans tes channels pour les gérer.`
+          : 'Aucune instance sur ce serveur.',
+        '',
+        'Tu peux créer une nouvelle instance ou importer une configuration existante.',
+      ].join('\n')));
+      c.addSeparatorComponents(sep());
+      c.addActionRowComponents(row(
+        btn('onboard:start', 'Créer une instance', ButtonStyle.Success, '🚀'),
+        btn('onboard:import', 'Importer une config', ButtonStyle.Secondary, '📥'),
+      ));
+    })]);
+
+    try {
+      await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+      await interaction.reply({ content: '📬 Check tes DMs !', ephemeral: true });
+    } catch {
+      await interaction.reply({ content: '❌ Impossible d\'envoyer un DM. Vérifie que tes DMs sont activés.', ephemeral: true });
+    }
+    return;
+  }
+
   // ─── Modal submissions ───
   if (interaction.isModalSubmit()) {
     await handleModalSubmit(interaction, globalDb, registry);

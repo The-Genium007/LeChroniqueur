@@ -56,6 +56,18 @@ async function main(): Promise<void> {
   await loginBot(client);
   logger.info({ tag: client.user?.tag }, 'Bot connected to Discord');
 
+  // ─── 2b. Register slash commands ───
+  try {
+    const { REST, Routes, SlashCommandBuilder } = await import('discord.js');
+    const rest = new REST({ version: '10' }).setToken(config.DISCORD_TOKEN);
+    const setupCmd = new SlashCommandBuilder().setName('setup').setDescription('Reçois un DM pour configurer ou créer une instance');
+    await rest.put(Routes.applicationCommands(client.user?.id ?? ''), { body: [setupCmd.toJSON()] });
+    logger.info('Slash command /setup registered globally');
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    logger.warn({ error: msg }, 'Failed to register slash commands');
+  }
+
   // ─── 3. Instance Registry ───
   const registry = new InstanceRegistry(globalDb, client);
   await registry.loadAll();
@@ -103,6 +115,12 @@ async function main(): Promise<void> {
   setupChannelRouter(client, registry, {
     // ─── Instance interactions (buttons + modals in instance channels) ───
     instanceInteraction: async (interaction, ctx) => {
+      // Handle /setup command — forward to global handler (works from any channel)
+      if (interaction.isChatInputCommand() && interaction.commandName === 'setup') {
+        await handleWizardInteraction(interaction, globalDb, registry);
+        return;
+      }
+
       // Handle search modal submission
       if (interaction.isModalSubmit() && interaction.customId === 'search:modal:query') {
         const query = interaction.fields.getTextInputValue('query');
