@@ -88,12 +88,12 @@ export function buildToneSelection(session: WizardSession): V2MessagePayload {
       '',
       'Quel ton veux-tu pour ton persona ?',
       '',
-      '1. 😏 **Sarcastique/taquin** — comme un pote',
-      '2. 📚 **Expert/pédagogue** — le prof cool',
-      '3. 🔥 **Hype/énergique** — le streamer',
-      '4. 🎩 **Mystérieux/narratif** — le conteur',
-      '',
-      'Tu peux aussi décrire ton propre ton.',
+      '😏 **Sarcastique/taquin** — comme un pote',
+      '📚 **Expert/pédagogue** — le prof cool',
+      '🔥 **Hype/énergique** — le streamer',
+      '🎩 **Mystérieux/narratif** — le conteur',
+      '✏️ **Custom** — décris ton propre ton',
+      '🏢 **Neutre/officiel** — ton professionnel, pas de persona IA',
     ].join('\n')));
     c.addSeparatorComponents(sep());
     c.addActionRowComponents(row(
@@ -101,6 +101,10 @@ export function buildToneSelection(session: WizardSession): V2MessagePayload {
       btn('wizard:tone:expert', 'Expert', ButtonStyle.Secondary, '📚'),
       btn('wizard:tone:hype', 'Hype', ButtonStyle.Secondary, '🔥'),
       btn('wizard:tone:mysterious', 'Mystérieux', ButtonStyle.Secondary, '🎩'),
+    ));
+    c.addActionRowComponents(row(
+      btn('wizard:tone:custom', 'Custom', ButtonStyle.Primary, '✏️'),
+      btn('wizard:tone:neutral', 'Neutre/officiel', ButtonStyle.Secondary, '🏢'),
     ));
   })]);
 }
@@ -111,6 +115,46 @@ const TONE_MAP: Record<string, string> = {
   hype: 'Hype/énergique, le streamer survolté qui célèbre tout.',
   mysterious: 'Mystérieux/narratif, le conteur qui maintient le suspense.',
 };
+
+/**
+ * Build a neutral/corporate persona that skips IA generation.
+ */
+export function buildNeutralPersona(session: WizardSession): string {
+  const name = session.data.projectName ?? 'Mon Projet';
+  const niche = session.data.projectNiche ?? '';
+  const lang = session.data.projectLanguage ?? 'fr';
+
+  const persona = [
+    `# Persona — ${name}`,
+    '',
+    '## Identité',
+    `- **Nom** : ${name}`,
+    `- **Domaine** : ${niche}`,
+    `- **Langue** : ${lang}`,
+    '- **Ton** : Professionnel, clair, neutre',
+    '',
+    '## Ton & personnalité',
+    '- Vouvoiement',
+    '- Ton informatif et factuel',
+    '- Pas d\'humour forcé, rester sobre',
+    '- Valoriser l\'expertise et la fiabilité',
+    '',
+    '## Vocabulaire',
+    '- Langage professionnel accessible',
+    '- Pas de jargon inutile',
+    '- Pas d\'emojis excessifs (max 1-2 par post)',
+    '- Ne jamais mentionner l\'IA ou l\'automatisation',
+    '',
+    '## Direction artistique',
+    '- Palette sobre et professionnelle',
+    '- Visuels épurés, typographie lisible',
+    '- Cohérence visuelle entre les plateformes',
+  ].join('\n');
+
+  session.data.personaFull = persona;
+  session.data.personaTone = 'Neutre/officiel — ton professionnel d\'entreprise.';
+  return persona;
+}
 
 export function setTone(session: WizardSession, toneKey: string): void {
   session.data.personaTone = TONE_MAP[toneKey] ?? toneKey;

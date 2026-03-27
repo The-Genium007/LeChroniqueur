@@ -23,7 +23,7 @@ import {
 import { buildDescribePrompt } from './describe.js';
 import { generateCategories } from './categories.js';
 import { dryRunCategories } from './dryrun.js';
-import { buildToneSelection, setTone, generatePersonaSection, assemblePersona } from './persona.js';
+import { buildToneSelection, setTone, generatePersonaSection, assemblePersona, buildNeutralPersona } from './persona.js';
 import { buildPlatformSelection, buildScheduleConfig, togglePlatform } from './platforms.js';
 import { buildConfirmation } from './confirm.js';
 import { validateAnthropicKey, validateGoogleAiKey, storeInstanceSecret } from '../api-keys.js';
@@ -245,7 +245,16 @@ export async function handleWizardInteraction(
         return;
       }
 
-      // At least one platform configured — proceed
+      // Store configured + connected platforms for step 11 (platform selection)
+      const allPostizPlatforms = [...new Set([...configured, ...result.connected])];
+      const doneSession = findSessionForUser(globalDb, interaction);
+      if (doneSession !== undefined) {
+        (doneSession.data as Record<string, unknown>)['_configuredPostizPlatforms'] = allPostizPlatforms;
+        // Pre-select all configured platforms
+        doneSession.data.platforms = allPostizPlatforms;
+        saveWizardSession(globalDb, doneSession);
+      }
+
       try { await interaction.editReply({ content: '✅' }); interaction.deleteReply().catch(() => {}); } catch { /* expired */ }
       await advanceToDescribe(interaction, globalDb);
       return;
@@ -367,6 +376,45 @@ export async function handleWizardInteraction(
     if (!interaction.replied && !interaction.deferred) {
       try { await interaction.deferUpdate(); } catch { /* expired */ }
     }
+  } else if (customId === 'wizard:tone:neutral') {
+    // Neutral/corporate — skip all persona generation, jump to platforms
+    buildNeutralPersona(session);
+    goToStep(session, 'configure_platforms');
+    saveWizardSession(globalDb, session);
+    const neutralPayload = v2([buildContainer(getColor('success'), (c) => {
+      c.addTextDisplayComponents(txt([
+        '## 🏢 Persona neutre activé',
+        '',
+        'Un persona professionnel standard a été créé.',
+        'Pas de génération IA — on passe directement à la configuration des plateformes.',
+      ].join('\n')));
+      c.addSeparatorComponents(sep());
+      c.addActionRowComponents(row(
+        btn('wizard:next', 'Continuer', ButtonStyle.Success, '▶️'),
+        btn('wizard:back', 'Revenir au choix', ButtonStyle.Secondary, '◀️'),
+      ));
+    })]);
+    await sendWizardDM(interaction, neutralPayload, session);
+    saveWizardSession(globalDb, session);
+
+  } else if (customId === 'wizard:tone:custom') {
+    // Custom tone — open modal for free-text description
+    const modal = new ModalBuilder()
+      .setCustomId('wizard:modal:tone:custom')
+      .setTitle('Ton personnalisé')
+      .addComponents(
+        new ActionRowBuilder<TextInputBuilder>().addComponents(
+          new TextInputBuilder()
+            .setCustomId('custom_tone')
+            .setLabel('Décris le ton de ton persona')
+            .setStyle(TextInputStyle.Paragraph)
+            .setPlaceholder('Ex: Un expert passionné qui parle comme un ami proche, avec des touches d\'ironie...')
+            .setRequired(true)
+            .setMaxLength(500),
+        ),
+      );
+    await interaction.showModal(modal);
+
   } else if (customId.startsWith('wizard:tone:')) {
     const tone = customId.split(':')[2] ?? 'sarcastic';
     setTone(session, tone);
@@ -403,7 +451,14 @@ export async function handleWizardInteraction(
     togglePlatform(session, platform);
     saveWizardSession(globalDb, session);
     const payload = buildPlatformSelection(session);
-    try { await interaction.update({ components: payload.components as never[] }); } catch { /* expired */ }
+    // Delete the old message and send a new one so button styles update
+    try { await interaction.message.delete(); } catch { /* already deleted */ }
+    const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+    trackDmMessageId(session, sentMsg.id);
+    saveWizardSession(globalDb, session);
+    if (!interaction.replied && !interaction.deferred) {
+      try { await interaction.deferUpdate(); } catch { /* expired */ }
+    }
   }
 }
 
@@ -449,6 +504,35 @@ async function handleModalSubmit(
   _registry: InstanceRegistry,
 ): Promise<void> {
   const customId = interaction.customId;
+
+  // Custom tone modal
+  if (customId === 'wizard:modal:tone:custom') {
+    const customTone = interaction.fields.getTextInputValue('custom_tone');
+    const session = findSessionForUser(globalDb, interaction);
+    if (session === undefined) {
+      await interaction.reply({ content: 'Session expirée.', ephemeral: true });
+      return;
+    }
+    setTone(session, customTone);
+    saveWizardSession(globalDb, session);
+    advanceStep(session);
+    saveWizardSession(globalDb, session);
+
+    try { await interaction.deferReply({ ephemeral: true }); } catch { /* expired */ }
+    try {
+      const payload = await generatePersonaSection(session, 'identity');
+      const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+      trackDmMessageId(session, sentMsg.id);
+      saveWizardSession(globalDb, session);
+      await interaction.editReply({ content: '✅' });
+      interaction.deleteReply().catch(() => {});
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      getLogger().error({ error: msg, step: 'review_persona_identity' }, 'Custom tone → persona generation failed');
+      await interaction.editReply({ content: `⚠️ Erreur lors de la génération : ${msg.slice(0, 200)}` });
+    }
+    return;
+  }
 
   if (customId === 'wizard:modal:anthropic') {
     const apiKey = interaction.fields.getTextInputValue('api_key');
