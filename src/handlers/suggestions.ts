@@ -5,9 +5,10 @@ import { generateSuggestions, type GeneratedSuggestion } from '../content/sugges
 import { indexDocument } from '../search/engine.js';
 import { checkThresholds, isApiAllowed } from '../budget/tracker.js';
 import {
-  suggestion as buildSuggestionEmbed,
+  suggestion as buildSuggestionV2,
   budgetAlert as buildBudgetAlert,
-} from '../discord/message-builder.js';
+} from '../discord/component-builder-v2.js';
+import { sendSplit } from '../discord/message-splitter.js';
 import type { InstanceContext } from '../registry/instance-context.js';
 
 function saveSuggestion(
@@ -76,7 +77,7 @@ async function runSuggestionsPipeline(
         .run('proposed', suggestion.sourceArticleId, 'new');
     }
 
-    const payload = buildSuggestionEmbed({
+    const payload = buildSuggestionV2({
       id,
       content: [
         `**Hook :** ${suggestion.hook}`,
@@ -91,13 +92,13 @@ async function runSuggestionsPipeline(
       format: suggestion.format,
     });
 
-    const message = await ideesChannel.send({
-      embeds: payload.embeds,
-      components: payload.components,
-    });
+    const messageIds = await sendSplit(ideesChannel, payload);
+    const firstMsgId = messageIds[0];
 
-    db.prepare('UPDATE suggestions SET discord_message_id = ? WHERE id = ?')
-      .run(message.id, id);
+    if (firstMsgId !== undefined) {
+      db.prepare('UPDATE suggestions SET discord_message_id = ? WHERE id = ?')
+        .run(firstMsgId, id);
+    }
   }
 
   const alerts = checkThresholds(db);
@@ -109,10 +110,7 @@ async function runSuggestionsPipeline(
       alert.budgetCents,
     );
     const targetChannel = alert.period === 'monthly' ? alertChannel : logsChannel;
-    await targetChannel.send({
-      embeds: alertPayload.embeds,
-      components: alertPayload.components,
-    });
+    await sendSplit(targetChannel, alertPayload);
   }
 
   logger.info({ count: suggestions.length }, 'Suggestions pipeline complete');

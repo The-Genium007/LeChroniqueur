@@ -2,7 +2,8 @@ import type { Message, TextChannel } from 'discord.js';
 import type { SqliteDatabase } from '../core/database.js';
 import { getLogger } from '../core/logger.js';
 import { modifySuggestion } from '../content/suggestions.js';
-import { suggestion as buildSuggestionEmbed, infoMessage } from '../discord/message-builder.js';
+import { suggestion as buildSuggestionV2, infoMessage } from '../discord/component-builder-v2.js';
+import { sendSplit } from '../discord/message-splitter.js';
 import type { InstanceContext } from '../registry/instance-context.js';
 
 interface PendingModification {
@@ -52,7 +53,7 @@ async function handleModificationMessage(
   if (Date.now() - pending.timestamp > MODIFICATION_TIMEOUT_MS) {
     pendingModifications.delete(message.author.id);
     const payload = infoMessage('⏰ La modification a expiré (5 minutes). Reclique sur ✏️ Modifier pour recommencer.');
-    await message.reply({ embeds: payload.embeds });
+    await message.reply({ components: payload.components as never[], flags: payload.flags } as never);
     return;
   }
 
@@ -70,7 +71,7 @@ async function handleModificationMessage(
       .get(pending.suggestionId) as { pillar: string; platform: string; format: string | null } | undefined;
 
     if (row !== undefined) {
-      const payload = buildSuggestionEmbed({
+      const payload = buildSuggestionV2({
         id: pending.suggestionId,
         content: modified,
         pillar: row.pillar,
@@ -78,13 +79,13 @@ async function handleModificationMessage(
         format: row.format ?? undefined,
       });
 
-      const newMsg = await ideesChannel.send({
-        embeds: payload.embeds,
-        components: payload.components,
-      });
+      const msgIds = await sendSplit(ideesChannel, payload);
+      const firstMsgId = msgIds[0];
 
-      db.prepare('UPDATE suggestions SET discord_message_id = ? WHERE id = ?')
-        .run(newMsg.id, pending.suggestionId);
+      if (firstMsgId !== undefined) {
+        db.prepare('UPDATE suggestions SET discord_message_id = ? WHERE id = ?')
+          .run(firstMsgId, pending.suggestionId);
+      }
     }
 
     await message.react('✅');

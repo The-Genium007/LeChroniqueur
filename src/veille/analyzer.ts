@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { complete } from '../services/anthropic.js';
 import { getLogger } from '../core/logger.js';
 import type { RawArticle } from './collector.js';
-import type { PreferenceEntryData } from '../discord/message-builder.js';
+import type { V2PreferenceEntry as PreferenceEntryData } from '../discord/component-builder-v2.js';
 
 export interface AnalyzedArticle extends RawArticle {
   readonly score: number;

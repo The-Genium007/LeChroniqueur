@@ -9,8 +9,8 @@ import {
   veilleDigest,
   veilleArticle,
   budgetAlert as buildBudgetAlert,
-  type VeilleArticleSummary,
-} from '../discord/message-builder.js';
+} from '../discord/component-builder-v2.js';
+import { sendSplit } from '../discord/message-splitter.js';
 import type { InstanceContext } from '../registry/instance-context.js';
 import type { TextChannel } from 'discord.js';
 
@@ -102,7 +102,7 @@ async function runVeillePipeline(
   const sortedArticles = savedArticles
     .sort((a, b) => b.article.score - a.article.score);
 
-  const topArticles: VeilleArticleSummary[] = sortedArticles
+  const topArticles = sortedArticles
     .filter((a) => a.article.score >= 8)
     .map((a) => ({
       id: a.id,
@@ -112,28 +112,26 @@ async function runVeillePipeline(
       source: a.article.source,
       url: a.article.url,
       score: a.article.score,
-      publishedDate: a.article.publishedDate,
     }));
 
   logger.info({ topCount: topArticles.length, totalAnalyzed: sortedArticles.length }, 'Sending veille digest');
 
   const digestPayload = veilleDigest(topArticles, stats);
-  let digestMessage;
+  let digestMessageIds: string[];
   try {
-    digestMessage = await veilleChannel.send({
-      embeds: digestPayload.embeds,
-      components: digestPayload.components,
-    });
+    digestMessageIds = await sendSplit(veilleChannel, digestPayload);
   } catch (sendError) {
     const msg = sendError instanceof Error ? sendError.message : String(sendError);
     logger.error({ error: msg }, 'Failed to send veille digest');
     return;
   }
 
+  const firstDigestId = digestMessageIds[0];
   const threadArticles = sortedArticles.filter((a) => a.article.score >= 5);
   logger.info({ threadArticleCount: threadArticles.length }, 'Creating veille thread');
 
-  if (threadArticles.length > 0) {
+  if (threadArticles.length > 0 && firstDigestId !== undefined) {
+    const digestMessage = await veilleChannel.messages.fetch(firstDigestId);
     const thread = await digestMessage.startThread({
       name: `Détails veille — ${new Date().toLocaleDateString('fr-FR')}`,
       autoArchiveDuration: 1440,
@@ -149,16 +147,15 @@ async function runVeillePipeline(
           source: article.source,
           url: article.url,
           score: article.score,
-          publishedDate: article.publishedDate,
         });
 
-        const articleMsg = await thread.send({
-          embeds: articlePayload.embeds,
-          components: articlePayload.components,
-        });
+        const articleMsgIds = await sendSplit(thread, articlePayload);
+        const firstArticleMsgId = articleMsgIds[0];
 
-        db.prepare('UPDATE veille_articles SET discord_message_id = ?, discord_thread_id = ? WHERE id = ?')
-          .run(articleMsg.id, thread.id, id);
+        if (firstArticleMsgId !== undefined) {
+          db.prepare('UPDATE veille_articles SET discord_message_id = ?, discord_thread_id = ? WHERE id = ?')
+            .run(firstArticleMsgId, thread.id, id);
+        }
       } catch (articleError) {
         const msg = articleError instanceof Error ? articleError.message : String(articleError);
         logger.warn({ error: msg, articleId: id }, 'Failed to send article to thread, skipping');
@@ -175,10 +172,7 @@ async function runVeillePipeline(
       alert.budgetCents,
     );
     const targetChannel = alert.period === 'monthly' ? adminChannel : logsChannel;
-    await targetChannel.send({
-      embeds: alertPayload.embeds,
-      components: alertPayload.components,
-    });
+    await sendSplit(targetChannel, alertPayload);
   }
 
   logger.info(

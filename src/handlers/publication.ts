@@ -6,7 +6,8 @@ import { indexDocument } from '../search/engine.js';
 import {
   publicationConfirmation as buildPublicationConfirmation,
   errorMessage,
-} from '../discord/message-builder.js';
+} from '../discord/component-builder-v2.js';
+import { sendSplit } from '../discord/message-splitter.js';
 
 interface PublicationDeps {
   readonly db: SqliteDatabase;
@@ -51,7 +52,7 @@ export async function handlePublish(
     const msg = error instanceof Error ? error.message : String(error);
     logger.error({ error: msg }, 'Failed to list Postiz integrations');
     const payload = errorMessage(`Impossible de lister les intégrations Postiz : ${msg}`);
-    await logsChannel.send({ embeds: payload.embeds });
+    await sendSplit(logsChannel, payload);
     return;
   }
 
@@ -70,7 +71,7 @@ export async function handlePublish(
   if (matchingIntegrations.length === 0) {
     logger.warn({ platform: targetPlatform }, 'No active integration found for platform');
     const payload = errorMessage(`Aucune intégration active trouvée pour ${targetPlatform}. Configure-la dans Postiz.`);
-    await publicationChannel.send({ embeds: payload.embeds });
+    await sendSplit(publicationChannel, payload);
     return;
   }
 
@@ -142,7 +143,7 @@ export async function handlePublish(
       content: extractPostText(suggestion.content).slice(0, 200),
     });
 
-    await publicationChannel.send({ embeds: payload.embeds });
+    await sendSplit(publicationChannel, payload);
 
     logger.info(
       { pubId, platform: targetPlatform, scheduledAt: scheduledDate.toISOString() },
@@ -177,7 +178,7 @@ export async function handlePublish(
     const msg = error instanceof Error ? error.message : String(error);
     logger.error({ error: msg, suggestionId }, 'Publication scheduling failed');
     const payload = errorMessage(`Erreur de publication : ${msg}`);
-    await publicationChannel.send({ embeds: payload.embeds });
+    await sendSplit(publicationChannel, payload);
   }
 }
 

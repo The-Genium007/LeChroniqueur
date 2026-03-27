@@ -37,8 +37,9 @@ import {
   searchResults as buildSearchResults,
   budgetReport as buildBudgetReport,
   preferenceProfile as buildPreferenceProfile,
-  type BudgetPeriodData,
-} from '../discord/message-builder.js';
+  type V2BudgetPeriodData as BudgetPeriodData,
+} from '../discord/component-builder-v2.js';
+import { sendSplit } from '../discord/message-splitter.js';
 
 export function bootDryRun(config: Config, db: SqliteDatabase): void {
   const logger = getLogger();
@@ -144,10 +145,7 @@ export function bootDryRun(config: Config, db: SqliteDatabase): void {
       total,
     );
 
-    await channels.admin.send({
-      embeds: payload.embeds,
-      components: payload.components,
-    });
+    await sendSplit(channels.admin, payload);
   });
 
   commandHandlers.set('budget', async () => {
@@ -158,7 +156,7 @@ export function bootDryRun(config: Config, db: SqliteDatabase): void {
     ];
 
     const payload = buildBudgetReport(periods);
-    await channels.admin.send({ embeds: payload.embeds });
+    await sendSplit(channels.admin, payload);
   });
 
   commandHandlers.set('stats', async () => {
@@ -170,7 +168,7 @@ export function bootDryRun(config: Config, db: SqliteDatabase): void {
     }));
 
     const payload = buildPreferenceProfile(profile);
-    await channels.admin.send({ embeds: payload.embeds });
+    await sendSplit(channels.admin, payload);
   });
 
   // ─── CLI button handlers (simplified — no interaction objects) ───

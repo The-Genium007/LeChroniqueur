@@ -28,10 +28,11 @@ import { deepDive } from './veille/deep-dive.js';
 import { generateFinalScript } from './content/scripts.js';
 import { recordAnthropicUsage } from './budget/tracker.js';
 import {
-  production as buildProductionV1,
-  deepDiveResult as buildDeepDiveV1,
-  errorMessage as buildErrorV1,
-} from './discord/message-builder.js';
+  production as buildProductionV2,
+  deepDiveResult as buildDeepDiveV2,
+  errorMessage as buildErrorV2,
+} from './discord/component-builder-v2.js';
+import { sendSplit, replySplit } from './discord/message-splitter.js';
 import { handleGenerateImages } from './handlers/production.js';
 import { handlePublish } from './handlers/publication.js';
 import { handleWizardInteraction } from './onboarding/wizard/orchestrator.js';
@@ -257,13 +258,12 @@ async function main(): Promise<void> {
           const article = ctx.db.prepare('SELECT title, translated_title FROM veille_articles WHERE id = ?')
             .get(targetId) as { title: string; translated_title: string | null } | undefined;
           const title = article?.translated_title ?? article?.title ?? 'Article';
-          const payload = buildDeepDiveV1({ articleTitle: title, analysis: result.analysis, contentSuggestions: result.contentSuggestions, articleId: targetId });
-          await interaction.editReply({ embeds: payload.embeds, components: payload.components });
+          const payload = buildDeepDiveV2({ articleTitle: title, analysis: result.analysis, contentSuggestions: result.contentSuggestions, articleId: targetId });
+          await replySplit(interaction, payload);
           ctx.db.prepare('UPDATE veille_articles SET status = ? WHERE id = ?').run('transformed', targetId);
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
-          const payload = buildErrorV1(`Deep dive échoué : ${msg}`);
-          await interaction.editReply({ embeds: payload.embeds });
+          await replySplit(interaction, buildErrorV2(`Deep dive échoué : ${msg}`));
         }
       } else if (action === 'transform_accept') {
         ctx.db.prepare('UPDATE veille_articles SET status = ? WHERE id = ?').run('proposed', targetId);
@@ -280,8 +280,8 @@ async function main(): Promise<void> {
             .get(targetId) as { content: string; platform: string; format: string | null } | undefined;
           if (suggestion !== undefined) {
             const script = await generateFinalScript(suggestion.content, suggestion.platform, suggestion.format ?? 'reel');
-            const payload = buildProductionV1({ id: targetId, textOverlay: script.textOverlay, fullScript: script.fullScript, hashtags: script.hashtags, platform: script.platform, suggestedTime: script.suggestedTime, notes: script.notes });
-            await ctx.channels.production.send({ embeds: payload.embeds, components: payload.components });
+            const payload = buildProductionV2({ id: targetId, textOverlay: script.textOverlay, fullScript: script.fullScript, hashtags: script.hashtags, platform: script.platform, suggestedTime: script.suggestedTime, notes: script.notes });
+            await sendSplit(ctx.channels.production, payload);
           }
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
@@ -394,18 +394,22 @@ async function main(): Promise<void> {
         } else if (rawId.startsWith('search:recent:')) {
           const type = rawId.split(':')[2] ?? 'articles';
           let results;
+          const { infoMessage: infoV2 } = await import('./discord/component-builder-v2.js');
           if (type === 'articles') {
             results = ctx.db.prepare("SELECT id, title, translated_title FROM veille_articles ORDER BY collected_at DESC LIMIT 10").all() as Array<{ id: number; title: string; translated_title: string | null }>;
             const lines = results.map((r) => `► ${r.translated_title ?? r.title}`);
-            await interaction.reply({ content: lines.length > 0 ? `**📰 Articles récents :**\n${lines.join('\n')}` : 'Aucun article.', ephemeral: true });
+            const payload = infoV2(lines.length > 0 ? `**📰 Articles récents :**\n${lines.join('\n')}` : 'Aucun article.');
+            await interaction.reply({ components: payload.components as never[], flags: payload.flags, ephemeral: true } as never);
           } else if (type === 'suggestions') {
             results = ctx.db.prepare("SELECT id, content FROM suggestions ORDER BY created_at DESC LIMIT 10").all() as Array<{ id: number; content: string }>;
             const lines = results.map((r) => `► ${r.content.slice(0, 80)}...`);
-            await interaction.reply({ content: lines.length > 0 ? `**💡 Suggestions récentes :**\n${lines.join('\n')}` : 'Aucune suggestion.', ephemeral: true });
+            const payload = infoV2(lines.length > 0 ? `**💡 Suggestions récentes :**\n${lines.join('\n')}` : 'Aucune suggestion.');
+            await interaction.reply({ components: payload.components as never[], flags: payload.flags, ephemeral: true } as never);
           } else {
             results = ctx.db.prepare("SELECT id, content, platform FROM publications ORDER BY created_at DESC LIMIT 10").all() as Array<{ id: number; content: string; platform: string }>;
             const lines = results.map((r) => `► [${r.platform}] ${r.content.slice(0, 60)}...`);
-            await interaction.reply({ content: lines.length > 0 ? `**📤 Publications récentes :**\n${lines.join('\n')}` : 'Aucune publication.', ephemeral: true });
+            const payload = infoV2(lines.length > 0 ? `**📤 Publications récentes :**\n${lines.join('\n')}` : 'Aucune publication.');
+            await interaction.reply({ components: payload.components as never[], flags: payload.flags, ephemeral: true } as never);
           }
         }
 
@@ -877,8 +881,7 @@ async function main(): Promise<void> {
       if (ctx === undefined) return;
       logger.warn({ instanceId: ctx.id, channelId }, 'Instance channel deleted');
       try {
-        const payload = buildErrorV1(`⚠️ Un channel de l'instance a été supprimé (ID: ${channelId}).`);
-        await ctx.channels.logs.send({ embeds: payload.embeds });
+        await sendSplit(ctx.channels.logs, buildErrorV2(`⚠️ Un channel de l'instance a été supprimé (ID: ${channelId}).`));
       } catch { /* logs channel itself may be deleted */ }
     },
 

@@ -9,7 +9,8 @@ import {
   videoSegmentResult as buildVideoSegmentResult,
   budgetAlert as buildBudgetAlert,
   errorMessage,
-} from '../discord/message-builder.js';
+} from '../discord/component-builder-v2.js';
+import { sendSplit, replySplit } from '../discord/message-splitter.js';
 
 interface ProductionHandlerDeps {
   readonly db: SqliteDatabase;
@@ -27,8 +28,7 @@ export async function handleGenerateImages(
   const { db, productionChannel, logsChannel, adminChannel } = deps;
 
   if (!isApiAllowed(db)) {
-    const payload = errorMessage('Budget API épuisé — génération d\'images bloquée.');
-    await interaction.editReply({ embeds: payload.embeds });
+    await replySplit(interaction, errorMessage('Budget API épuisé — génération d\'images bloquée.'));
     return;
   }
 
@@ -39,8 +39,7 @@ export async function handleGenerateImages(
   `).get(suggestionId) as { content: string; platform: string; format: string | null; id: number } | undefined;
 
   if (suggestion === undefined) {
-    const payload = errorMessage('Suggestion introuvable.');
-    await interaction.editReply({ embeds: payload.embeds });
+    await replySplit(interaction, errorMessage('Suggestion introuvable.'));
     return;
   }
 
@@ -66,15 +65,12 @@ export async function handleGenerateImages(
       variants: result.variants.map((v) => ({
         index: v.index,
         naming: v.naming,
-        postizPath: v.postizPath,
+        url: v.postizPath,
         dbId: v.dbId,
       })),
     });
 
-    await productionChannel.send({
-      embeds: payload.embeds,
-      components: payload.components,
-    });
+    await sendSplit(productionChannel, payload);
 
     // Check budget after generation
     const alerts = checkThresholds(db);
@@ -86,13 +82,12 @@ export async function handleGenerateImages(
         alert.budgetCents,
       );
       const targetChannel = alert.period === 'monthly' ? adminChannel : logsChannel;
-      await targetChannel.send({ embeds: alertPayload.embeds });
+      await sendSplit(targetChannel, alertPayload);
     }
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     logger.error({ error: msg, suggestionId }, 'Image generation failed');
-    const payload = errorMessage(`Génération d'images échouée : ${msg}`);
-    await interaction.editReply({ embeds: payload.embeds });
+    await replySplit(interaction, errorMessage(`Génération d'images échouée : ${msg}`));
   }
 }
 
@@ -106,8 +101,7 @@ export async function handleGenerateVideoSegment(
   const { db, productionChannel, logsChannel, adminChannel } = deps;
 
   if (!isApiAllowed(db)) {
-    const payload = errorMessage('Budget API épuisé — génération vidéo bloquée.');
-    await interaction.editReply({ embeds: payload.embeds });
+    await replySplit(interaction, errorMessage('Budget API épuisé — génération vidéo bloquée.'));
     return;
   }
 
@@ -131,10 +125,7 @@ export async function handleGenerateVideoSegment(
       dbId: segment.dbId,
     });
 
-    await productionChannel.send({
-      embeds: payload.embeds,
-      components: payload.components,
-    });
+    await sendSplit(productionChannel, payload);
 
     const alerts = checkThresholds(db);
     for (const alert of alerts) {
@@ -145,13 +136,12 @@ export async function handleGenerateVideoSegment(
         alert.budgetCents,
       );
       const targetChannel = alert.period === 'monthly' ? adminChannel : logsChannel;
-      await targetChannel.send({ embeds: alertPayload.embeds });
+      await sendSplit(targetChannel, alertPayload);
     }
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     logger.error({ error: msg, suggestionId }, 'Video generation failed');
-    const payload = errorMessage(`Génération vidéo échouée : ${msg}`);
-    await interaction.editReply({ embeds: payload.embeds });
+    await replySplit(interaction, errorMessage(`Génération vidéo échouée : ${msg}`));
   }
 }
 

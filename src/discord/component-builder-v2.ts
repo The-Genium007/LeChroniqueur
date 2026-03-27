@@ -109,12 +109,12 @@ export function infoMessage(message: string, theme?: Partial<typeof DEFAULT_THEM
 export interface V2VeilleArticle {
   readonly id: number;
   readonly title: string;
-  readonly translatedTitle?: string;
-  readonly suggestedAngle?: string;
+  readonly translatedTitle?: string | undefined;
+  readonly suggestedAngle?: string | undefined;
   readonly source: string;
   readonly url: string;
   readonly score: number;
-  readonly thumbnailUrl?: string;
+  readonly thumbnailUrl?: string | undefined;
 }
 
 export interface V2VeilleStats {
@@ -189,7 +189,7 @@ export interface V2SuggestionData {
   readonly content: string;
   readonly pillar: string;
   readonly platform: string;
-  readonly format?: string;
+  readonly format?: string | undefined;
 }
 
 export function suggestion(data: V2SuggestionData, theme?: Partial<typeof DEFAULT_THEME>): V2MessagePayload {
@@ -564,7 +564,7 @@ export function weeklyReport(data: V2WeeklyReportData, theme?: Partial<typeof DE
 
 export interface V2ImageGalleryData {
   readonly suggestionId: number;
-  readonly variants: readonly { index: number; naming: string; url?: string; dbId?: number }[];
+  readonly variants: readonly { index: number; naming: string; url?: string | undefined; dbId?: number | undefined }[];
 }
 
 export function imageGallery(data: V2ImageGalleryData, theme?: Partial<typeof DEFAULT_THEME>): V2MessagePayload {
@@ -583,6 +583,46 @@ export function imageGallery(data: V2ImageGalleryData, theme?: Partial<typeof DE
     if (buttons.length > 0) {
       c.addActionRowComponents(row(...buttons.slice(0, 5)));
     }
+  })]);
+}
+
+// ─── Video Segment Result V2 ───
+
+export interface V2VideoSegmentResultData {
+  readonly naming: string;
+  readonly durationSeconds: number;
+  readonly postizPath?: string | undefined;
+  readonly dbId: number;
+}
+
+export function videoSegmentResult(data: V2VideoSegmentResultData, theme?: Partial<typeof DEFAULT_THEME>): V2MessagePayload {
+  return v2([buildContainer(getColor('production', theme), (c) => {
+    c.addTextDisplayComponents(txt('## 🎬 Segment vidéo généré'));
+    c.addTextDisplayComponents(txt(`📁 **Fichier** : ${data.naming}  ·  ⏱️ **Durée** : ${String(data.durationSeconds)}s`));
+
+    if (data.postizPath !== undefined) {
+      c.addTextDisplayComponents(txt(`🔗 [Voir dans Postiz](${data.postizPath})`));
+    }
+  })]);
+}
+
+// ─── Publication Confirmation V2 ───
+
+export interface V2PublicationConfirmationData {
+  readonly platform: string;
+  readonly scheduledAt: string;
+  readonly postizPostId: string;
+  readonly content: string;
+}
+
+export function publicationConfirmation(data: V2PublicationConfirmationData, theme?: Partial<typeof DEFAULT_THEME>): V2MessagePayload {
+  return v2([buildContainer(getColor('publication', theme), (c) => {
+    c.addTextDisplayComponents(txt('## 📤 Publication programmée'));
+    c.addTextDisplayComponents(txt(
+      `📱 **Plateforme** : ${data.platform}  ·  📅 **Date** : ${data.scheduledAt}\n🔗 **Postiz ID** : ${data.postizPostId}`,
+    ));
+    c.addSeparatorComponents(sep());
+    c.addTextDisplayComponents(txt(`**📝 Aperçu**\n${data.content.slice(0, 200)}`));
   })]);
 }
 
