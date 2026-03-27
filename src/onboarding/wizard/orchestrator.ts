@@ -373,9 +373,31 @@ export async function handleWizardInteraction(
     saveWizardSession(globalDb, session);
     advanceStep(session);
     saveWizardSession(globalDb, session);
-    const payload = await generatePersonaSection(session, 'identity');
-    await sendWizardDM(interaction, payload, session);
-    saveWizardSession(globalDb, session);
+    // Defer immediately — generatePersonaSection makes an API call that takes >3s
+    try { await interaction.deferReply({ ephemeral: true }); } catch { /* expired */ }
+    try {
+      const payload = await generatePersonaSection(session, 'identity');
+      const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+      trackDmMessageId(session, sentMsg.id);
+      saveWizardSession(globalDb, session);
+      await interaction.editReply({ content: '✅' });
+      interaction.deleteReply().catch(() => {});
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      getLogger().error({ error: errMsg, step: 'review_persona_identity' }, 'Tone → persona generation failed');
+      const errPayload = v2([buildContainer(getColor('error'), (c) => {
+        c.addTextDisplayComponents(txt(`## ⚠️ Erreur\nLa génération du persona a échoué : ${errMsg.slice(0, 200)}\n\nRéessaie.`));
+        c.addSeparatorComponents(sep());
+        c.addActionRowComponents(row(
+          btn('wizard:redo', 'Réessayer', ButtonStyle.Primary, '🔄'),
+          btn('wizard:next', 'Passer', ButtonStyle.Secondary, '⏭️'),
+        ));
+      })]);
+      const errMsg2 = await interaction.user.send({ components: errPayload.components as never[], flags: errPayload.flags });
+      trackDmMessageId(session, errMsg2.id);
+      saveWizardSession(globalDb, session);
+      try { await interaction.editReply({ content: '⚠️' }); interaction.deleteReply().catch(() => {}); } catch { /* expired */ }
+    }
   } else if (customId.startsWith('wizard:platform:')) {
     const platform = customId.split(':')[2] ?? '';
     togglePlatform(session, platform);
