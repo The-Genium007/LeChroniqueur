@@ -897,11 +897,17 @@ async function handleWizardConfirm(
     try { await interaction.editReply({ content: '🏗️ Création des channels Discord...' }); } catch { /* expired */ }
     const infra = await createInfrastructure(guild, instanceName, interaction.user.id);
 
-    // 3. Register instance in global DB
+    // 3. Register instance in global DB (upsert in case a deleted instance with same ID exists)
     const cronOffset = registry.getActiveCount() * 3;
+    // Clean up any leftover data from a previously deleted instance with the same ID
+    globalDb.prepare('DELETE FROM instance_channels WHERE instance_id = ?').run(instanceId);
+    globalDb.prepare('DELETE FROM instance_secrets WHERE instance_id = ?').run(instanceId);
     globalDb.prepare(`
       INSERT INTO instances (id, guild_id, name, category_id, owner_id, status, cron_offset_minutes)
       VALUES (?, ?, ?, ?, ?, 'active', ?)
+      ON CONFLICT(id) DO UPDATE SET
+        guild_id = excluded.guild_id, name = excluded.name, category_id = excluded.category_id,
+        owner_id = excluded.owner_id, status = 'active', cron_offset_minutes = excluded.cron_offset_minutes
     `).run(instanceId, guild.id, instanceName, infra.categoryId, interaction.user.id, cronOffset);
 
     registerChannels(globalDb, instanceId, infra.channels);
