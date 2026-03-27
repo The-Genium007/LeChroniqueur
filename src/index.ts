@@ -188,6 +188,25 @@ async function main(): Promise<void> {
             storeInstanceSecret(globalDb, ctx.id, 'google_ai', apiKey);
             await interaction.editReply({ content: '✅ Clé Google AI mise à jour et validée.' });
           }
+        } else if (section.startsWith('postiz:')) {
+          const platformId = section.replace('postiz:', '');
+          await interaction.deferReply({ ephemeral: true });
+          const { PLATFORM_CONFIG: PC, configurePlatform: configPlat } = await import('./onboarding/postiz-setup.js');
+          const def = PC[platformId];
+          if (def === undefined) { await interaction.editReply({ content: 'Plateforme inconnue.' }); return; }
+          const keys: Record<string, string> = {};
+          for (const envVar of def.envVars) {
+            if (envVar === undefined) continue;
+            try { keys[envVar] = fields.getTextInputValue(envVar); } catch { /* field not found */ }
+          }
+          try {
+            await interaction.editReply({ content: `⏳ Configuration de ${def.label}... Redémarrage de Postiz.` });
+            await configPlat(platformId as import('./onboarding/postiz-setup.js').PlatformId, keys);
+            await interaction.editReply({ content: `✅ ${def.label} configuré ! Postiz redémarré.\n\nVa sur Postiz pour connecter ton compte.` });
+          } catch (error) {
+            const errMsg = error instanceof Error ? error.message : String(error);
+            await interaction.editReply({ content: `⚠️ Erreur : ${errMsg}` });
+          }
         }
         return;
       }
@@ -535,28 +554,74 @@ async function main(): Promise<void> {
             );
           await interaction.showModal(apiModal);
 
-        // ── Postiz accounts ──
-        } else if (rawId === 'dash:config:postiz' || rawId === 'dash:config:postiz:refresh') {
+        // ── Postiz accounts (interactive) ──
+        } else if (rawId === 'dash:config:postiz' || rawId === 'dash:postiz:back' || rawId === 'dash:postiz:verify') {
           await interaction.deferReply({ ephemeral: true });
           try {
-            const { listIntegrations } = await import('./services/postiz.js');
-            const integrations = await listIntegrations();
-            const lines = integrations.length > 0
-              ? integrations.map((i: { name: string; identifier: string; disabled: boolean }) => `${i.disabled ? '❌' : '✅'} **${i.name}** (${i.identifier})`).join('\n')
-              : 'Aucun compte connecté.';
-            const postizUrl = process.env['POSTIZ_URL'] ?? 'http://localhost:5000';
-            const { buildContainer: bc4, txt: t4, sep: s4, btn: b4, row: r4, v2: v24, getColor: gc4, ButtonStyle: bs4 } = await import('./discord/component-builder-v2.js');
-            const postizPayload = v24([bc4(gc4('info'), (c4) => {
-              c4.addTextDisplayComponents(t4(`## 📤 Comptes Postiz\n\n${lines}\n\nPour ajouter ou supprimer des comptes, rendez-vous sur :\n${postizUrl}`));
-              c4.addSeparatorComponents(s4());
-              c4.addActionRowComponents(r4(
-                b4('dash:config:postiz:refresh', 'Rafraîchir', bs4.Secondary, '🔄'),
-              ));
-            })]);
+            const { verifyPostizIntegrations: verifyPostiz, buildPostizScreen: buildScreen } = await import('./onboarding/postiz-setup.js');
+            const result = await verifyPostiz();
+            const postizPayload = await buildScreen('dash:postiz', result.connected);
             await interaction.editReply({ components: postizPayload.components as never[] } as never);
           } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
-            await interaction.editReply({ content: `⚠️ Impossible de lister les comptes Postiz : ${msg}` });
+            await interaction.editReply({ content: `⚠️ Impossible de charger la config Postiz : ${msg}` });
+          }
+        } else if (rawId === 'dash:postiz:more') {
+          await interaction.deferReply({ ephemeral: true });
+          try {
+            const { verifyPostizIntegrations: verifyPostiz, getConfiguredPlatforms: getConfigured, buildPostizMoreScreen: buildMore } = await import('./onboarding/postiz-setup.js');
+            const result = await verifyPostiz();
+            let configured: string[];
+            try { configured = await getConfigured(); } catch { configured = []; }
+            const morePayload = buildMore('dash:postiz', result.connected, configured as import('./onboarding/postiz-setup.js').PlatformId[]);
+            await interaction.editReply({ components: morePayload.components as never[] } as never);
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            await interaction.editReply({ content: `⚠️ Erreur : ${msg}` });
+          }
+        } else if (rawId.startsWith('dash:postiz:platform:')) {
+          const platformId = rawId.replace('dash:postiz:platform:', '');
+          await interaction.deferReply({ ephemeral: true });
+          try {
+            const { verifyPostizIntegrations: verifyPostiz, getConfiguredPlatforms: getConfigured, buildPlatformDetail: buildDetail, PLATFORM_CONFIG: PC } = await import('./onboarding/postiz-setup.js');
+            const def = PC[platformId];
+            if (def === undefined) { await interaction.editReply({ content: 'Plateforme inconnue.' }); return; }
+            const result = await verifyPostiz();
+            let configured: string[];
+            try { configured = await getConfigured(); } catch { configured = []; }
+            const detailPayload = buildDetail('dash:postiz', platformId as import('./onboarding/postiz-setup.js').PlatformId, configured.includes(platformId), result.connected.includes(platformId));
+            await interaction.editReply({ components: detailPayload.components as never[] } as never);
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            await interaction.editReply({ content: `⚠️ Erreur : ${msg}` });
+          }
+        } else if (rawId.startsWith('dash:postiz:keys:')) {
+          const platformId = rawId.replace('dash:postiz:keys:', '');
+          const { PLATFORM_CONFIG: PC } = await import('./onboarding/postiz-setup.js');
+          const def = PC[platformId];
+          if (def === undefined) return;
+          const keyModal = new ModalBuilder().setCustomId(`config:modal:postiz:${platformId}`).setTitle(`${def.label} — Clés API`);
+          for (let i = 0; i < def.envVars.length && i < 5; i++) {
+            const envVar = def.envVars[i];
+            const label = def.envLabels[i] ?? envVar;
+            if (envVar === undefined) continue;
+            keyModal.addComponents(
+              new ModalActionRow<TextInputBuilder>().addComponents(new TextInputBuilder().setCustomId(envVar).setLabel(label ?? envVar).setStyle(TextInputStyle.Short).setRequired(true)),
+            );
+          }
+          await interaction.showModal(keyModal);
+        } else if (rawId.startsWith('dash:postiz:remove:')) {
+          const platformId = rawId.replace('dash:postiz:remove:', '');
+          await interaction.deferReply({ ephemeral: true });
+          try {
+            const { removePlatform: rmPlatform, PLATFORM_CONFIG: PC } = await import('./onboarding/postiz-setup.js');
+            const def = PC[platformId];
+            if (def === undefined) { await interaction.editReply({ content: 'Plateforme inconnue.' }); return; }
+            await rmPlatform(platformId as import('./onboarding/postiz-setup.js').PlatformId);
+            await interaction.editReply({ content: `✅ ${def.label} supprimé. Postiz redémarré.` });
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            await interaction.editReply({ content: `⚠️ Erreur : ${msg}` });
           }
 
         // ── Delete instance ──

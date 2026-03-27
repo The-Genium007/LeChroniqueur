@@ -27,6 +27,17 @@ import { buildToneSelection, setTone, generatePersonaSection, assemblePersona } 
 import { buildPlatformSelection, buildScheduleConfig, togglePlatform } from './platforms.js';
 import { buildConfirmation } from './confirm.js';
 import { validateAnthropicKey, validateGoogleAiKey, storeInstanceSecret } from '../api-keys.js';
+import {
+  PLATFORM_CONFIG,
+  type PlatformId,
+  buildPostizScreen,
+  buildPostizMoreScreen,
+  buildPlatformDetail,
+  getConfiguredPlatforms,
+  configurePlatform,
+  removePlatform,
+  verifyPostizIntegrations,
+} from '../postiz-setup.js';
 import { validateInfrastructure, createInfrastructure, registerChannels } from '../infrastructure.js';
 import { seedCategories } from '../../veille/queries.js';
 import { buildSearchInterface } from '../../dashboard/search.js';
@@ -166,60 +177,157 @@ export async function handleWizardInteraction(
   // ─── Postiz setup buttons ───
   if (customId.startsWith('onboard:postiz:')) {
     const sub = customId.replace('onboard:postiz:', '');
+
     if (sub === 'skip') {
       await advanceToDescribe(interaction, globalDb);
       return;
     }
-    if (sub === 'verify') {
-      const { verifyPostizIntegrations } = await import('../postiz-setup.js');
+
+    if (sub === 'verify' || sub === 'back') {
+      // Show/refresh the main Postiz screen with updated statuses
       await interaction.deferReply({ ephemeral: true });
       const result = await verifyPostizIntegrations();
-      const lines = result.connected.length > 0
-        ? result.connected.map((c) => `✅ ${c}`).join('\n')
-        : '❌ Aucune intégration connectée';
-      const payload = v2([buildContainer(getColor('info'), (c) => {
-        c.addTextDisplayComponents(txt(`## 📤 Intégrations Postiz\n${lines}\n\n${String(result.total)} plateforme(s) connectée(s).`));
-        c.addSeparatorComponents(sep());
-        c.addActionRowComponents(row(
-          btn('onboard:postiz:verify', 'Revérifier', ButtonStyle.Secondary, '🔄'),
-          btn('onboard:postiz:done', 'Continuer', ButtonStyle.Success, '✅'),
-        ));
-      })]);
+      const payload = await buildPostizScreen('onboard:postiz', result.connected);
       const verifyMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
       const verifySession = findSessionForUser(globalDb, interaction);
       if (verifySession !== undefined) {
         trackDmMessageId(verifySession, verifyMsg.id);
         saveWizardSession(globalDb, verifySession);
       }
-      try { await interaction.editReply({ content: '✅' }); interaction.deleteReply().catch(() => {}); } catch { /* interaction expired */ }
+      try { await interaction.editReply({ content: '✅' }); interaction.deleteReply().catch(() => {}); } catch { /* expired */ }
       return;
     }
+
+    if (sub === 'more') {
+      await interaction.deferReply({ ephemeral: true });
+      const result = await verifyPostizIntegrations();
+      let configured: PlatformId[];
+      try { configured = await getConfiguredPlatforms(); } catch { configured = []; }
+      const payload = buildPostizMoreScreen('onboard:postiz', result.connected, configured);
+      const moreMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+      const moreSession = findSessionForUser(globalDb, interaction);
+      if (moreSession !== undefined) {
+        trackDmMessageId(moreSession, moreMsg.id);
+        saveWizardSession(globalDb, moreSession);
+      }
+      try { await interaction.editReply({ content: '✅' }); interaction.deleteReply().catch(() => {}); } catch { /* expired */ }
+      return;
+    }
+
     if (sub === 'done') {
+      // Check if at least one platform is configured or connected
+      await interaction.deferReply({ ephemeral: true });
+      const result = await verifyPostizIntegrations();
+      let configured: PlatformId[];
+      try { configured = await getConfiguredPlatforms(); } catch { configured = []; }
+
+      if (result.connected.length === 0 && configured.length === 0) {
+        const warnPayload = v2([buildContainer(getColor('warning'), (c) => {
+          c.addTextDisplayComponents(txt([
+            '## ⚠️ Aucune plateforme configurée',
+            '',
+            'Tu n\'as configuré aucune plateforme sociale.',
+            'Tu pourras le faire plus tard depuis le dashboard.',
+          ].join('\n')));
+          c.addSeparatorComponents(sep());
+          c.addActionRowComponents(row(
+            btn('onboard:postiz:force', 'Continuer quand même', ButtonStyle.Secondary, '⏭️'),
+            btn('onboard:postiz:back', 'Configurer', ButtonStyle.Primary, '🔧'),
+          ));
+        })]);
+        const warnMsg = await interaction.user.send({ components: warnPayload.components as never[], flags: warnPayload.flags });
+        const warnSession = findSessionForUser(globalDb, interaction);
+        if (warnSession !== undefined) {
+          trackDmMessageId(warnSession, warnMsg.id);
+          saveWizardSession(globalDb, warnSession);
+        }
+        try { await interaction.editReply({ content: '✅' }); interaction.deleteReply().catch(() => {}); } catch { /* expired */ }
+        return;
+      }
+
+      // At least one platform configured — proceed
+      try { await interaction.editReply({ content: '✅' }); interaction.deleteReply().catch(() => {}); } catch { /* expired */ }
       await advanceToDescribe(interaction, globalDb);
       return;
     }
-    // Social platform config buttons handled by showing guide
-    if (sub.startsWith('social:')) {
-      const platform = sub.replace('social:', '');
-      const { PLATFORM_CONFIG, getRedirectUri } = await import('../postiz-setup.js');
-      const config = PLATFORM_CONFIG[platform as keyof typeof PLATFORM_CONFIG];
-      if (config !== undefined) {
-        const redirectUri = getRedirectUri(platform as 'tiktok' | 'instagram' | 'x' | 'linkedin');
-        await interaction.reply({
-          content: [
-            `## ${config.emoji} Configuration ${config.label}`,
-            '',
-            `**Redirect URI** : \`${redirectUri}\``,
-            `**Scopes/Notes** : ${config.scopes}`,
-            `**Variables requises** : ${config.envVars.join(', ')}`,
-            '',
-            'Configure l\'app sur la plateforme développeur, puis entre les clés via le bouton ci-dessous.',
-          ].join('\n'),
-          ephemeral: true,
-        });
-      }
+
+    if (sub === 'force') {
+      await advanceToDescribe(interaction, globalDb);
       return;
     }
+
+    // Platform detail: onboard:postiz:platform:{id}
+    if (sub.startsWith('platform:')) {
+      const platformId = sub.replace('platform:', '') as PlatformId;
+      const def = PLATFORM_CONFIG[platformId];
+      if (def === undefined) return;
+      await interaction.deferReply({ ephemeral: true });
+      const result = await verifyPostizIntegrations();
+      let configured: PlatformId[];
+      try { configured = await getConfiguredPlatforms(); } catch { configured = []; }
+      const isConnected = result.connected.includes(platformId);
+      const isConfigured = configured.includes(platformId);
+      const payload = buildPlatformDetail('onboard:postiz', platformId, isConfigured, isConnected);
+      const detailMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+      const detailSession = findSessionForUser(globalDb, interaction);
+      if (detailSession !== undefined) {
+        trackDmMessageId(detailSession, detailMsg.id);
+        saveWizardSession(globalDb, detailSession);
+      }
+      try { await interaction.editReply({ content: '✅' }); interaction.deleteReply().catch(() => {}); } catch { /* expired */ }
+      return;
+    }
+
+    // Open keys modal: onboard:postiz:keys:{id}
+    if (sub.startsWith('keys:')) {
+      const platformId = sub.replace('keys:', '') as PlatformId;
+      const def = PLATFORM_CONFIG[platformId];
+      if (def === undefined) return;
+      const modal = new ModalBuilder()
+        .setCustomId(`wizard:modal:postiz:${platformId}`)
+        .setTitle(`${def.label} — Clés API`);
+      for (let i = 0; i < def.envVars.length && i < 5; i++) {
+        const envVar = def.envVars[i];
+        const label = def.envLabels[i] ?? envVar;
+        if (envVar === undefined) continue;
+        modal.addComponents(
+          new ActionRowBuilder<TextInputBuilder>().addComponents(
+            new TextInputBuilder()
+              .setCustomId(envVar)
+              .setLabel(label ?? envVar)
+              .setStyle(TextInputStyle.Short)
+              .setRequired(true),
+          ),
+        );
+      }
+      await interaction.showModal(modal);
+      return;
+    }
+
+    // Remove platform: onboard:postiz:remove:{id}
+    if (sub.startsWith('remove:')) {
+      const platformId = sub.replace('remove:', '') as PlatformId;
+      const def = PLATFORM_CONFIG[platformId];
+      if (def === undefined) return;
+      await interaction.deferReply({ ephemeral: true });
+      try {
+        await removePlatform(platformId);
+        await interaction.editReply({ content: `✅ ${def.label} supprimé. Postiz redémarré.` });
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        await interaction.editReply({ content: `⚠️ Erreur : ${msg}` });
+      }
+      // Auto-refresh main screen after a short delay
+      setTimeout(async () => {
+        try {
+          const result = await verifyPostizIntegrations();
+          const payload = await buildPostizScreen('onboard:postiz', result.connected);
+          await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+        } catch { /* best effort */ }
+      }, 2000);
+      return;
+    }
+
     return;
   }
 
@@ -370,6 +478,42 @@ async function handleModalSubmit(
     await advanceToPostiz(interaction, globalDb);
     return;
   }
+
+  // Postiz platform credentials modal: wizard:modal:postiz:{platformId}
+  if (customId.startsWith('wizard:modal:postiz:')) {
+    const platformId = customId.replace('wizard:modal:postiz:', '') as PlatformId;
+    const def = PLATFORM_CONFIG[platformId];
+    if (def === undefined) return;
+
+    await interaction.deferReply({ ephemeral: true });
+
+    const keys: Record<string, string> = {};
+    for (const envVar of def.envVars) {
+      if (envVar === undefined) continue;
+      try {
+        keys[envVar] = interaction.fields.getTextInputValue(envVar);
+      } catch { /* field not found */ }
+    }
+
+    try {
+      await interaction.editReply({ content: `⏳ Configuration de ${def.label}... Redémarrage de Postiz.` });
+      await configurePlatform(platformId, keys);
+      await interaction.editReply({ content: `✅ ${def.label} configuré ! Postiz redémarré.\n\nVa sur Postiz pour connecter ton compte, puis reviens vérifier.` });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      await interaction.editReply({ content: `⚠️ Erreur lors de la configuration de ${def.label} : ${msg}` });
+    }
+
+    // Auto-refresh main screen
+    setTimeout(async () => {
+      try {
+        const result = await verifyPostizIntegrations();
+        const payload = await buildPostizScreen('onboard:postiz', result.connected);
+        await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+      } catch { /* best effort */ }
+    }, 3000);
+    return;
+  }
 }
 
 // ─── Step handlers ───
@@ -378,32 +522,8 @@ async function advanceToPostiz(
   interaction: ButtonInteraction | ModalSubmitInteraction,
   globalDb: SqliteDatabase,
 ): Promise<void> {
-  const { getAvailablePlatforms, PLATFORM_CONFIG } = await import('../postiz-setup.js');
-  const available = getAvailablePlatforms();
-
-  const platformButtons = available.map((p) => {
-    const config = PLATFORM_CONFIG[p];
-    return btn(`onboard:postiz:social:${p}`, config.label, ButtonStyle.Secondary, config.emoji);
-  });
-
-  const payload = v2([buildContainer(getColor('primary'), (c) => {
-    c.addTextDisplayComponents(txt([
-      '## 📤 Configuration Postiz',
-      '',
-      'Si tu as connecté des réseaux sociaux dans Postiz,',
-      'vérifie que tout est en ordre.',
-      '',
-      'Si tu n\'as pas encore configuré Postiz, tu peux le faire plus tard.',
-    ].join('\n')));
-    c.addSeparatorComponents(sep());
-    if (platformButtons.length > 0) {
-      c.addActionRowComponents(row(...platformButtons.slice(0, 4)));
-    }
-    c.addActionRowComponents(row(
-      btn('onboard:postiz:verify', 'Vérifier les intégrations', ButtonStyle.Primary, '🔄'),
-      btn('onboard:postiz:skip', 'Plus tard', ButtonStyle.Secondary, '⏭️'),
-    ));
-  })]);
+  const result = await verifyPostizIntegrations();
+  const payload = await buildPostizScreen('onboard:postiz', result.connected);
 
   const session = findSessionForUser(globalDb, interaction);
   if (interaction.replied || interaction.deferred) {
