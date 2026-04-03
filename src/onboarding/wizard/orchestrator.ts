@@ -63,6 +63,7 @@ import { validateInfrastructure, createInfrastructure, registerChannels } from '
 import { saveProfile, upsertConfigOverride } from '../../core/instance-profile.js';
 import { upsertSource } from '../../veille/sources/index.js';
 import { saveScheduleConfig } from '../../core/scheduler-weekly.js';
+import { sendSplit } from '../../discord/message-splitter.js';
 import { buildSearchInterface } from '../../dashboard/search.js';
 import { buildDashboardHome, collectDashboardHomeData } from '../../dashboard/pages/home.js';
 import {
@@ -81,17 +82,28 @@ async function sendWizardDM(
   payload: { components: unknown[]; flags: number },
   session?: WizardSession,
 ): Promise<void> {
-  const msg = await interaction.user.send({
-    components: payload.components as never[],
-    flags: payload.flags,
-  });
+  const ids = await sendSplit(interaction.user, payload as import('../../discord/component-builder-v2.js').V2MessagePayload);
   if (session !== undefined) {
-    trackDmMessageId(session, msg.id);
+    for (const id of ids) trackDmMessageId(session, id);
   }
   // Acknowledge the interaction silently — ignore if expired
   if (!interaction.replied && !interaction.deferred) {
     try { await interaction.deferUpdate(); } catch { /* interaction expired */ }
   }
+}
+
+/**
+ * Send a V2 payload as DM (with splitting) and track all message IDs in the session.
+ * Returns the sent message IDs.
+ */
+async function dmSplit(
+  user: import('discord.js').User,
+  payload: import('../../discord/component-builder-v2.js').V2MessagePayload,
+  session: WizardSession,
+): Promise<string[]> {
+  const ids = await sendSplit(user, payload);
+  for (const id of ids) trackDmMessageId(session, id);
+  return ids;
 }
 
 /**
@@ -167,7 +179,7 @@ export async function handleWizardInteraction(
     })]);
 
     try {
-      await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+      await sendSplit(interaction.user, payload);
       await interaction.reply({ content: '📬 Check tes DMs !', ephemeral: true });
     } catch {
       await interaction.reply({ content: '❌ Impossible d\'envoyer un DM. Vérifie que tes DMs sont activés.', ephemeral: true });
@@ -217,8 +229,7 @@ export async function handleWizardInteraction(
     const session = createWizardSession(globalDb, guildId, interaction.user.id);
     saveWizardSession(globalDb, session);
     const providerPayload = buildProviderSelection(session);
-    const providerMsg = await interaction.user.send({ components: providerPayload.components as never[], flags: providerPayload.flags });
-    trackDmMessageId(session, providerMsg.id);
+    await dmSplit(interaction.user, providerPayload, session);
     saveWizardSession(globalDb, session);
     try { await interaction.editReply({ content: '📩 Check tes DMs !' }); } catch { /* expired */ }
     return;
@@ -243,8 +254,7 @@ export async function handleWizardInteraction(
     // Start with LLM provider selection same as normal
     await interaction.deferReply({ ephemeral: true });
     const importProviderPayload = buildProviderSelection(session);
-    const importProviderMsg = await interaction.user.send({ components: importProviderPayload.components as never[], flags: importProviderPayload.flags });
-    trackDmMessageId(session, importProviderMsg.id);
+    await dmSplit(interaction.user, importProviderPayload, session);
     saveWizardSession(globalDb, session);
     try { await interaction.editReply({ content: '📩 Check tes DMs !' }); } catch { /* expired */ }
     return;
@@ -260,8 +270,7 @@ export async function handleWizardInteraction(
       saveWizardSession(globalDb, session);
       const payload = buildModelSelection(session);
       await interaction.deferReply({ ephemeral: true });
-      const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
-      trackDmMessageId(session, sentMsg.id);
+      await dmSplit(interaction.user, payload, session);
       saveWizardSession(globalDb, session);
       try { await interaction.editReply({ content: '✅' }); interaction.deleteReply().catch(() => {}); } catch { /* expired */ }
     }
@@ -292,11 +301,12 @@ export async function handleWizardInteraction(
       await interaction.deferReply({ ephemeral: true });
       const result = await verifyPostizIntegrations();
       const payload = await buildPostizScreen('onboard:postiz', result.connected);
-      const verifyMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
       const verifySession = findSessionForUser(globalDb, interaction);
       if (verifySession !== undefined) {
-        trackDmMessageId(verifySession, verifyMsg.id);
+        await dmSplit(interaction.user, payload, verifySession);
         saveWizardSession(globalDb, verifySession);
+      } else {
+        await sendSplit(interaction.user, payload);
       }
       try { await interaction.editReply({ content: '✅' }); interaction.deleteReply().catch(() => {}); } catch { /* expired */ }
       return;
@@ -308,11 +318,12 @@ export async function handleWizardInteraction(
       let configured: PlatformId[];
       try { configured = await getConfiguredPlatforms(); } catch { configured = []; }
       const payload = buildPostizMoreScreen('onboard:postiz', result.connected, configured);
-      const moreMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
       const moreSession = findSessionForUser(globalDb, interaction);
       if (moreSession !== undefined) {
-        trackDmMessageId(moreSession, moreMsg.id);
+        await dmSplit(interaction.user, payload, moreSession);
         saveWizardSession(globalDb, moreSession);
+      } else {
+        await sendSplit(interaction.user, payload);
       }
       try { await interaction.editReply({ content: '✅' }); interaction.deleteReply().catch(() => {}); } catch { /* expired */ }
       return;
@@ -339,11 +350,12 @@ export async function handleWizardInteraction(
             btn('onboard:postiz:back', 'Configurer', ButtonStyle.Primary, '🔧'),
           ));
         })]);
-        const warnMsg = await interaction.user.send({ components: warnPayload.components as never[], flags: warnPayload.flags });
         const warnSession = findSessionForUser(globalDb, interaction);
         if (warnSession !== undefined) {
-          trackDmMessageId(warnSession, warnMsg.id);
+          await dmSplit(interaction.user, warnPayload, warnSession);
           saveWizardSession(globalDb, warnSession);
+        } else {
+          await sendSplit(interaction.user, warnPayload);
         }
         try { await interaction.editReply({ content: '✅' }); interaction.deleteReply().catch(() => {}); } catch { /* expired */ }
         return;
@@ -381,11 +393,12 @@ export async function handleWizardInteraction(
       const isConnected = result.connected.includes(platformId);
       const isConfigured = configured.includes(platformId);
       const payload = buildPlatformDetail('onboard:postiz', platformId, isConfigured, isConnected);
-      const detailMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
       const detailSession = findSessionForUser(globalDb, interaction);
       if (detailSession !== undefined) {
-        trackDmMessageId(detailSession, detailMsg.id);
+        await dmSplit(interaction.user, payload, detailSession);
         saveWizardSession(globalDb, detailSession);
+      } else {
+        await sendSplit(interaction.user, payload);
       }
       try { await interaction.editReply({ content: '✅' }); interaction.deleteReply().catch(() => {}); } catch { /* expired */ }
       return;
@@ -435,7 +448,7 @@ export async function handleWizardInteraction(
         try {
           const result = await verifyPostizIntegrations();
           const payload = await buildPostizScreen('onboard:postiz', result.connected);
-          await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+          await sendSplit(interaction.user, payload);
         } catch { /* best effort */ }
       }, 2000);
       return;
@@ -494,7 +507,7 @@ export async function handleWizardInteraction(
         btn('onboard:start', 'Recommencer', ButtonStyle.Success, '🚀'),
       ));
     })]);
-    await interaction.user.send({ components: restartPayload.components as never[], flags: restartPayload.flags });
+    await sendSplit(interaction.user, restartPayload);
     if (!interaction.replied && !interaction.deferred) {
       try { await interaction.deferUpdate(); } catch { /* expired */ }
     }
@@ -547,8 +560,7 @@ export async function handleWizardInteraction(
     try { await interaction.deferReply({ ephemeral: true }); } catch { /* expired */ }
     try {
       const payload = await generatePersonaSection(session, 'identity');
-      const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
-      trackDmMessageId(session, sentMsg.id);
+      await dmSplit(interaction.user, payload, session);
       saveWizardSession(globalDb, session);
       await interaction.editReply({ content: '✅' });
       interaction.deleteReply().catch(() => {});
@@ -563,8 +575,7 @@ export async function handleWizardInteraction(
           btn('wizard:next', 'Passer', ButtonStyle.Secondary, '⏭️'),
         ));
       })]);
-      const errMsg2 = await interaction.user.send({ components: errPayload.components as never[], flags: errPayload.flags });
-      trackDmMessageId(session, errMsg2.id);
+      await dmSplit(interaction.user, errPayload, session);
       saveWizardSession(globalDb, session);
       try { await interaction.editReply({ content: '⚠️' }); interaction.deleteReply().catch(() => {}); } catch { /* expired */ }
     }
@@ -575,8 +586,7 @@ export async function handleWizardInteraction(
     const payload = buildPlatformSelection(session);
     // Delete the old message and send a new one so button styles update
     try { await interaction.message.delete(); } catch { /* already deleted */ }
-    const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
-    trackDmMessageId(session, sentMsg.id);
+    await dmSplit(interaction.user, payload, session);
     saveWizardSession(globalDb, session);
     if (!interaction.replied && !interaction.deferred) {
       try { await interaction.deferUpdate(); } catch { /* expired */ }
@@ -598,8 +608,7 @@ export async function handleWizardInteraction(
         advanceStep(session);
         saveWizardSession(globalDb, session);
         const payload = buildProfileValidation(session);
-        const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
-        trackDmMessageId(session, sentMsg.id);
+        await dmSplit(interaction.user, payload, session);
         saveWizardSession(globalDb, session);
         try { interaction.deleteReply().catch(() => {}); } catch { /* expired */ }
       } else {
@@ -619,8 +628,7 @@ export async function handleWizardInteraction(
     saveWizardSession(globalDb, session);
     const payload = buildSourcesSelection(session);
     try { await interaction.message.delete(); } catch { /* already deleted */ }
-    const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
-    trackDmMessageId(session, sentMsg.id);
+    await dmSplit(interaction.user, payload, session);
     saveWizardSession(globalDb, session);
     if (!interaction.replied && !interaction.deferred) {
       try { await interaction.deferUpdate(); } catch { /* expired */ }
@@ -642,8 +650,7 @@ export async function handleWizardInteraction(
     saveWizardSession(globalDb, session);
     const payload = buildScheduleConfig(session);
     try { await interaction.message.delete(); } catch { /* already deleted */ }
-    const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
-    trackDmMessageId(session, sentMsg.id);
+    await dmSplit(interaction.user, payload, session);
     saveWizardSession(globalDb, session);
     if (!interaction.replied && !interaction.deferred) {
       try { await interaction.deferUpdate(); } catch { /* expired */ }
@@ -655,8 +662,7 @@ export async function handleWizardInteraction(
     saveWizardSession(globalDb, session);
     const payload = buildScheduleConfig(session);
     try { await interaction.message.delete(); } catch { /* already deleted */ }
-    const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
-    trackDmMessageId(session, sentMsg.id);
+    await dmSplit(interaction.user, payload, session);
     saveWizardSession(globalDb, session);
     if (!interaction.replied && !interaction.deferred) {
       try { await interaction.deferUpdate(); } catch { /* expired */ }
@@ -668,8 +674,7 @@ export async function handleWizardInteraction(
     saveWizardSession(globalDb, session);
     const payload = buildScheduleConfig(session);
     try { await interaction.message.delete(); } catch { /* already deleted */ }
-    const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
-    trackDmMessageId(session, sentMsg.id);
+    await dmSplit(interaction.user, payload, session);
     saveWizardSession(globalDb, session);
     if (!interaction.replied && !interaction.deferred) {
       try { await interaction.deferUpdate(); } catch { /* expired */ }
@@ -684,8 +689,7 @@ export async function handleWizardInteraction(
     // Show model selection for this provider
     const payload = buildModelSelection(session);
     try { await interaction.message.delete(); } catch { /* already deleted */ }
-    const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
-    trackDmMessageId(session, sentMsg.id);
+    await dmSplit(interaction.user, payload, session);
     saveWizardSession(globalDb, session);
     if (!interaction.replied && !interaction.deferred) {
       try { await interaction.deferUpdate(); } catch { /* expired */ }
@@ -699,8 +703,7 @@ export async function handleWizardInteraction(
     // Refresh model selection UI
     const payload = buildModelSelection(session);
     try { await interaction.message.delete(); } catch { /* already deleted */ }
-    const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
-    trackDmMessageId(session, sentMsg.id);
+    await dmSplit(interaction.user, payload, session);
     saveWizardSession(globalDb, session);
     if (!interaction.replied && !interaction.deferred) {
       try { await interaction.deferUpdate(); } catch { /* expired */ }
@@ -724,8 +727,7 @@ export async function handleWizardInteraction(
     // Go back to provider selection
     const payload = buildProviderSelection(session);
     try { await interaction.message.delete(); } catch { /* already deleted */ }
-    const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
-    trackDmMessageId(session, sentMsg.id);
+    await dmSplit(interaction.user, payload, session);
     saveWizardSession(globalDb, session);
     if (!interaction.replied && !interaction.deferred) {
       try { await interaction.deferUpdate(); } catch { /* expired */ }
@@ -791,8 +793,7 @@ async function handleModalSubmit(
     try { await interaction.deferReply({ ephemeral: true }); } catch { /* expired */ }
     try {
       const payload = await generatePersonaSection(session, 'identity');
-      const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
-      trackDmMessageId(session, sentMsg.id);
+      await dmSplit(interaction.user, payload, session);
       saveWizardSession(globalDb, session);
       await interaction.editReply({ content: '✅' });
       interaction.deleteReply().catch(() => {});
@@ -876,8 +877,7 @@ async function handleModalSubmit(
 
     if (!valid) {
       const payload = buildValidationResult(false, provider?.name ?? providerId, modelId);
-      const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
-      trackDmMessageId(session, sentMsg.id);
+      await dmSplit(interaction.user, payload, session);
       saveWizardSession(globalDb, session);
       await interaction.editReply({ content: '❌ Clé invalide.' });
       return;
@@ -897,8 +897,7 @@ async function handleModalSubmit(
     saveWizardSession(globalDb, session);
 
     const payload = buildValidationResult(true, provider?.name ?? providerId, modelId);
-    const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
-    trackDmMessageId(session, sentMsg.id);
+    await dmSplit(interaction.user, payload, session);
     saveWizardSession(globalDb, session);
     await interaction.editReply({ content: '✅ Clé validée.' });
     return;
@@ -933,8 +932,7 @@ async function handleModalSubmit(
         btn('wizard:llm:back', 'Changer de provider', ButtonStyle.Secondary, '⬅️'),
       ));
     })]);
-    const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
-    trackDmMessageId(session, sentMsg.id);
+    await dmSplit(interaction.user, payload, session);
     saveWizardSession(globalDb, session);
     if (!interaction.replied && !interaction.deferred) {
       try { await interaction.deferUpdate(); } catch { /* expired */ }
@@ -961,8 +959,7 @@ async function handleModalSubmit(
       const { processDescribeModal } = await import('./describe.js');
       const { message } = await processDescribeModal(session, fields);
       saveWizardSession(globalDb, session);
-      const sentMsg = await interaction.user.send({ components: message.components as never[], flags: message.flags });
-      trackDmMessageId(session, sentMsg.id);
+      await dmSplit(interaction.user, message, session);
       saveWizardSession(globalDb, session);
       try { await interaction.editReply({ content: '✅' }); interaction.deleteReply().catch(() => {}); } catch { /* expired */ }
     } catch (error) {
@@ -1052,7 +1049,7 @@ async function handleModalSubmit(
       try {
         const result = await verifyPostizIntegrations();
         const payload = await buildPostizScreen('onboard:postiz', result.connected);
-        await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+        await sendSplit(interaction.user, payload);
       } catch { /* best effort */ }
     }, 3000);
     return;
@@ -1070,8 +1067,12 @@ async function advanceToPostiz(
 
   const session = findSessionForUser(globalDb, interaction);
   if (interaction.replied || interaction.deferred) {
-    const msg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
-    if (session !== undefined) { trackDmMessageId(session, msg.id); saveWizardSession(globalDb, session); }
+    if (session !== undefined) {
+      await dmSplit(interaction.user, payload, session);
+      saveWizardSession(globalDb, session);
+    } else {
+      await sendSplit(interaction.user, payload);
+    }
     try { await interaction.editReply({ content: '✅' }); interaction.deleteReply().catch(() => {}); } catch { /* interaction expired */ }
   } else {
     await sendWizardDM(interaction, payload, session);
@@ -1098,8 +1099,7 @@ async function advanceToDescribe(
       ].join('\n')));
     })]);
     if (interaction.replied || interaction.deferred) {
-      const msg = await interaction.user.send({ components: importPayload.components as never[], flags: importPayload.flags });
-      trackDmMessageId(session, msg.id);
+      await dmSplit(interaction.user, importPayload, session);
       session.step = 'describe_project'; // park at this step, waiting for file
       saveWizardSession(globalDb, session);
       try { await interaction.editReply({ content: '✅' }); interaction.deleteReply().catch(() => {}); } catch { /* expired */ }
@@ -1117,8 +1117,7 @@ async function advanceToDescribe(
   const payload = buildDescribePrompt(session);
 
   if (interaction.replied || interaction.deferred) {
-    const msg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
-    trackDmMessageId(session, msg.id);
+    await dmSplit(interaction.user, payload, session);
     saveWizardSession(globalDb, session);
     try { await interaction.editReply({ content: '✅' }); interaction.deleteReply().catch(() => {}); } catch { /* interaction expired */ }
   } else {
@@ -1223,8 +1222,7 @@ async function handleWizardNext(
 
   saveWizardSession(globalDb, session);
   try {
-    const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
-    trackDmMessageId(session, sentMsg.id);
+    await dmSplit(interaction.user, payload, session);
     saveWizardSession(globalDb, session);
     await interaction.editReply({ content: '✅' });
     interaction.deleteReply().catch(() => {});
@@ -1282,8 +1280,7 @@ async function handleWizardRedo(
   if (payload !== undefined) {
     saveWizardSession(globalDb, session);
     try {
-      const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
-      trackDmMessageId(session, sentMsg.id);
+      await dmSplit(interaction.user, payload, session);
       saveWizardSession(globalDb, session);
       await interaction.editReply({ content: '✅' });
       interaction.deleteReply().catch(() => {});
@@ -1425,8 +1422,7 @@ async function handleWizardBack(
   }
 
   try {
-    const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
-    trackDmMessageId(session, sentMsg.id);
+    await dmSplit(interaction.user, payload, session);
     saveWizardSession(globalDb, session);
     await interaction.editReply({ content: '✅' });
     interaction.deleteReply().catch(() => {});
@@ -1484,10 +1480,12 @@ async function handleWizardConfirm(
 
     registerChannels(globalDb, instanceId, infra.channels);
 
-    // 4. Store API keys
-    const anthropicKey = (session.data as Record<string, unknown>)['_anthropicKey'] as string | undefined;
-    if (anthropicKey !== undefined) {
-      storeInstanceSecret(globalDb, instanceId, 'anthropic', anthropicKey);
+    // 4. Store API keys (encrypted via AES-256-GCM in instance_secrets)
+    const llmKey = (session.data as Record<string, unknown>)['_anthropicKey'] as string | undefined;
+    if (llmKey !== undefined) {
+      // Store under both 'anthropic' (legacy compat) and 'llm' (generic)
+      storeInstanceSecret(globalDb, instanceId, 'anthropic', llmKey);
+      storeInstanceSecret(globalDb, instanceId, 'llm', llmKey);
     }
     const googleKey = (session.data as Record<string, unknown>)['_googleKey'] as string | undefined;
     if (googleKey !== undefined) {
@@ -1647,7 +1645,7 @@ async function handleWizardConfirm(
     })]);
 
     try {
-      await interaction.user.send({ components: donePayload.components as never[], flags: donePayload.flags });
+      await sendSplit(interaction.user, donePayload);
       await interaction.editReply({ content: '✅ Instance créée !' });
       setTimeout(() => { interaction.deleteReply().catch(() => {}); }, 5_000);
     } catch { /* expired */ }

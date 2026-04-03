@@ -897,7 +897,8 @@ async function main(): Promise<void> {
                   bDm('onboard:import', 'Importer une configuration', bsDm.Secondary, '📥'),
                 ));
               })]);
-              await owner.send({ components: dmPayload.components as never[], flags: dmPayload.flags });
+              const { sendSplit: splitDm } = await import('./discord/message-splitter.js');
+              await splitDm(owner, dmPayload);
             } catch { /* DMs disabled */ }
 
             // editReply will fail since the channel is deleted — that's expected

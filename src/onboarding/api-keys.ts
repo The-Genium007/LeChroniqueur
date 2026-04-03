@@ -37,8 +37,11 @@ export async function validateGoogleAiKey(apiKey: string): Promise<boolean> {
 
   try {
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1/models?key=${apiKey}`,
-      { signal: AbortSignal.timeout(10_000) },
+      'https://generativelanguage.googleapis.com/v1/models',
+      {
+        headers: { 'x-goog-api-key': apiKey },
+        signal: AbortSignal.timeout(10_000),
+      },
     );
     const valid = response.ok;
     if (valid) {

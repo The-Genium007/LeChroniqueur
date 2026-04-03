@@ -144,7 +144,7 @@ export class InstanceRegistry {
     }
 
     return {
-      anthropicApiKey: secrets['anthropic'] ?? '',
+      anthropicApiKey: secrets['llm'] ?? secrets['anthropic'] ?? '',
       anthropicModel: secrets['anthropic_model'] ?? 'claude-sonnet-4-20250514',
       googleAiApiKey: secrets['google_ai'],
       postizApiUrl: secrets['postiz_url'],

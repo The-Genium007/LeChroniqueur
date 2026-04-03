@@ -328,7 +328,6 @@ export function publicationKit(data: V2PublicationKit, theme?: Partial<typeof DE
     c.addSeparatorComponents(sep());
     c.addActionRowComponents(row(
       btn(`pub:copy:${String(data.id)}`, 'Copier caption', ButtonStyle.Primary, '📋'),
-      btn(`pub:download:${String(data.id)}`, 'Télécharger tout', ButtonStyle.Secondary, '📥'),
     ));
     c.addActionRowComponents(row(
       btn(`pub:done:${String(data.id)}`, 'Marqué comme publié', ButtonStyle.Success, '✅'),

@@ -2,6 +2,7 @@ import type { TextChannel } from 'discord.js';
 import type { SqliteDatabase } from '../core/database.js';
 import { getLogger } from '../core/logger.js';
 import { publicationKit, type V2PublicationKit } from '../discord/component-builder-v2.js';
+import { sendSplit } from '../discord/message-splitter.js';
 
 /**
  * Mode 1 — Manual publication kit.
@@ -52,10 +53,7 @@ export async function postPublicationKit(
 
   const payload = publicationKit(kitData);
 
-  await channel.send({
-    components: payload.components as never[],
-    flags: payload.flags,
-  });
+  await sendSplit(channel, payload);
 
   logger.info({ suggestionId, platform: suggestion.platform }, 'Publication kit posted');
 }
