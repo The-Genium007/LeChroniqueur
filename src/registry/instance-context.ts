@@ -1,6 +1,7 @@
 import type { TextChannel } from 'discord.js';
 import type { SqliteDatabase } from '../core/database.js';
 import type { InstanceConfig } from '../core/config.js';
+import type { InstanceProfile } from '../core/instance-profile.js';
 
 export interface InstanceChannelMap {
   readonly dashboard: TextChannel;
@@ -34,6 +35,7 @@ export interface InstanceContext {
   readonly ownerId: string;
   readonly categoryId: string;
   readonly config: InstanceConfig;
+  readonly profile: InstanceProfile;
   readonly db: SqliteDatabase;
   readonly channels: InstanceChannelMap;
   readonly secrets: InstanceSecrets;

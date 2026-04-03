@@ -73,8 +73,8 @@ export async function dryRunCategories(
     c.addSeparatorComponents(sep());
     c.addActionRowComponents(row(
       btn('wizard:next', 'C\'est bon, continuer', ButtonStyle.Success, '✅'),
-      btn('wizard:back', 'Modifier les catégories', ButtonStyle.Primary, '✏️'),
       btn('wizard:redo', 'Retester', ButtonStyle.Secondary, '🔄'),
+      btn('wizard:back', 'Retour', ButtonStyle.Secondary, '◀️'),
     ));
   })]);
 }

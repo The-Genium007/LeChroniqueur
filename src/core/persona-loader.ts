@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { SqliteDatabase } from './database.js';
 import { getLogger } from './logger.js';
 
-const DEFAULT_PERSONA = 'Tu es un agent IA créateur de contenu pour les réseaux sociaux. Ton style est engageant et authentique.';
+const DEFAULT_PERSONA = 'You are a content creation assistant for social media. Your style is engaging, authentic and adapted to the audience. Follow the user\'s tone and vocabulary guidelines.';
 
 /**
  * Centralized persona loader with per-instance cache.

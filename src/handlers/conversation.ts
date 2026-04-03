@@ -99,27 +99,9 @@ async function handleModificationMessage(
   }
 }
 
-// ─── V2: InstanceContext entry point ───
-
-export async function handleAdminMessageV2(
+export async function handleAdminMessage(
   message: Message,
   ctx: InstanceContext,
 ): Promise<void> {
   await handleModificationMessage(message, ctx.db, ctx.channels.idees, ctx.ownerId);
-}
-
-// ─── Legacy entry point ───
-
-interface ConversationHandlerDeps {
-  readonly db: SqliteDatabase;
-  readonly ideesChannel: TextChannel;
-}
-
-export async function handleAdminMessage(
-  message: Message,
-  deps: ConversationHandlerDeps,
-): Promise<void> {
-  const { getConfig } = await import('../core/config.js');
-  const config = getConfig();
-  await handleModificationMessage(message, deps.db, deps.ideesChannel, config.DISCORD_OWNER_ID);
 }

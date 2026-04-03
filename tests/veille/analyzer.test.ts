@@ -139,7 +139,7 @@ describe('analyze', () => {
     const result = await analyze(articles, []);
 
     expect(result.articles).toHaveLength(2);
-    expect(result.articles[0]?.score).toBe(5);
+    expect(result.articles[0]?.score).toBe(0);
     expect(result.articles[0]?.pillar).toBe('trend');
     expect(result.articles[0]?.suggestedAngle).toBe('');
     expect(result.tokensUsed).toEqual({ input: 50, output: 30 });
@@ -161,7 +161,7 @@ describe('analyze', () => {
     const result = await analyze(articles, []);
 
     expect(result.articles[0]?.score).toBe(8);
-    expect(result.articles[1]?.score).toBe(5);
+    expect(result.articles[1]?.score).toBe(0);
     expect(result.articles[1]?.pillar).toBe('trend');
     expect(result.articles[1]?.suggestedAngle).toBe('');
   });
@@ -230,20 +230,50 @@ describe('analyze', () => {
     expect(userMessage).toContain('Aucun profil de préférences disponible');
   });
 
-  it('should fallback on Zod validation failure (e.g. score out of range)', async () => {
+  it('should clamp out-of-range scores instead of rejecting', async () => {
     const articles = [makeArticle({ url: 'https://example.com/zod' })];
 
-    // score 15 is out of range [0, 10]
+    // score 15 is out of range [0, 10] — should be clamped to 10
     const badJson = JSON.stringify({
-      articles: [{ url: 'https://example.com/zod', score: 15, pillar: 'trend', suggestedAngle: 'Bad' }],
+      articles: [{ url: 'https://example.com/zod', score: 15, pillar: 'trend', suggestedAngle: 'Clamped' }],
     });
 
     mockComplete.mockResolvedValue({ text: badJson, tokensIn: 50, tokensOut: 30 });
 
     const result = await analyze(articles, []);
 
-    // Should fallback since Zod validation rejects score > 10
-    expect(result.articles[0]?.score).toBe(5);
-    expect(result.articles[0]?.suggestedAngle).toBe('');
+    expect(result.articles[0]?.score).toBe(10);
+    expect(result.articles[0]?.suggestedAngle).toBe('Clamped');
+  });
+
+  it('should fallback invalid pillar to default instead of rejecting batch', async () => {
+    const articles = [makeArticle({ url: 'https://example.com/pillar' })];
+
+    const badPillarJson = JSON.stringify({
+      articles: [{ url: 'https://example.com/pillar', score: 7, pillar: 'streaming', suggestedAngle: 'Fixed pillar' }],
+    });
+
+    mockComplete.mockResolvedValue({ text: badPillarJson, tokensIn: 50, tokensOut: 30 });
+
+    const result = await analyze(articles, []);
+
+    // Pillar "streaming" is invalid — should fallback to "trend" (first default pillar)
+    expect(result.articles[0]?.score).toBe(7);
+    expect(result.articles[0]?.pillar).toBe('trend');
+    expect(result.articles[0]?.suggestedAngle).toBe('Fixed pillar');
+  });
+
+  it('should force score 5 to 4', async () => {
+    const articles = [makeArticle({ url: 'https://example.com/five' })];
+
+    const json = JSON.stringify({
+      articles: [{ url: 'https://example.com/five', score: 5, pillar: 'trend', suggestedAngle: 'No five' }],
+    });
+
+    mockComplete.mockResolvedValue({ text: json, tokensIn: 50, tokensOut: 30 });
+
+    const result = await analyze(articles, []);
+
+    expect(result.articles[0]?.score).toBe(4);
   });
 });

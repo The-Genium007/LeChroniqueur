@@ -47,11 +47,11 @@ echo -e "${GREEN}Prerequis OK${NC} (docker, curl, openssl)"
 echo ""
 
 # ─── Collect information ───
-echo -e "${YELLOW}3 informations necessaires :${NC}"
+echo -e "${YELLOW}Configuration :${NC}"
 echo ""
 
 # 1. Discord Token
-echo -e "${BLUE}1/3${NC} Token du bot Discord"
+echo -e "${BLUE}1/4${NC} Token du bot Discord"
 echo "    Obtenir sur : https://discord.com/developers/applications > Bot > Token"
 read -rp "    Discord Bot Token: " DISCORD_TOKEN
 while [[ -z "$DISCORD_TOKEN" ]]; do
@@ -60,20 +60,35 @@ while [[ -z "$DISCORD_TOKEN" ]]; do
 done
 echo ""
 
-# 2. Postiz URL
-echo -e "${BLUE}2/3${NC} URL publique de Postiz"
-echo "    Exemples : https://postiz.mondomaine.com ou http://mon-vps:4007"
-read -rp "    Postiz URL: " POSTIZ_URL
-while [[ -z "$POSTIZ_URL" ]]; do
-  echo -e "${RED}    L'URL ne peut pas etre vide${NC}"
-  read -rp "    Postiz URL: " POSTIZ_URL
-done
+# 2. Domain (optional — enables HTTPS + TikTok)
+echo -e "${BLUE}2/4${NC} Nom de domaine pour Postiz ${YELLOW}(optionnel)${NC}"
+echo "    Exemple : postiz.mondomaine.com"
+echo "    Si fourni, active HTTPS automatique (Let's Encrypt) + TikTok"
+echo "    Laisse vide pour HTTP simple (pas de TikTok)"
+read -rp "    Domaine [vide = HTTP]: " POSTIZ_DOMAIN
 echo ""
 
-# 3. Postiz port (optional)
-echo -e "${BLUE}3/3${NC} Port local pour Postiz (defaut: 4007)"
+# 3. Postiz port (only relevant without domain, but always used as fallback)
+echo -e "${BLUE}3/4${NC} Port local pour Postiz (defaut: 4007)"
 read -rp "    Port [4007]: " POSTIZ_PORT
 POSTIZ_PORT="${POSTIZ_PORT:-4007}"
+echo ""
+
+# 4. Build POSTIZ_URL from domain or fallback to IP:port
+if [[ -n "$POSTIZ_DOMAIN" ]]; then
+  POSTIZ_URL="https://${POSTIZ_DOMAIN}"
+  ENABLE_HTTPS=true
+  echo -e "${GREEN}HTTPS active${NC} — Caddy obtiendra un certificat Let's Encrypt pour ${POSTIZ_DOMAIN}"
+else
+  echo -e "${BLUE}4/4${NC} URL publique de Postiz (sans domaine)"
+  echo "    Exemple : http://51.255.195.30:4007"
+  read -rp "    Postiz URL: " POSTIZ_URL
+  while [[ -z "$POSTIZ_URL" ]]; do
+    echo -e "${RED}    L'URL ne peut pas etre vide${NC}"
+    read -rp "    Postiz URL: " POSTIZ_URL
+  done
+  ENABLE_HTTPS=false
+fi
 echo ""
 
 # ─── Generate secrets ───
@@ -92,6 +107,7 @@ echo -e "${BLUE}Telechargement des fichiers...${NC}"
 curl -fsSL "${RAW_URL}/docker-compose.prod.yml" -o docker-compose.yml
 mkdir -p config/searxng
 curl -fsSL "${RAW_URL}/config/searxng/settings.yml" -o config/searxng/settings.yml 2>/dev/null || true
+curl -fsSL "${RAW_URL}/config/Caddyfile" -o config/Caddyfile 2>/dev/null || true
 echo -e "${GREEN}Fichiers telecharges${NC}"
 
 # ─── Generate .env ───
@@ -103,6 +119,7 @@ DISCORD_TOKEN=${DISCORD_TOKEN}
 MASTER_ENCRYPTION_KEY=${MASTER_ENCRYPTION_KEY}
 POSTIZ_URL=${POSTIZ_URL}
 POSTIZ_PORT=${POSTIZ_PORT}
+POSTIZ_DOMAIN=${POSTIZ_DOMAIN}
 POSTIZ_JWT_SIGNING_KEY=${POSTIZ_JWT_SIGNING_KEY}
 ENVEOF
 
@@ -128,7 +145,11 @@ echo ""
 
 # ─── Start ───
 echo -e "${BLUE}Demarrage des containers...${NC}"
-docker compose up -d
+if [[ "$ENABLE_HTTPS" == "true" ]]; then
+  docker compose --profile https up -d
+else
+  docker compose up -d
+fi
 
 echo ""
 echo -e "${GREEN}================================================${NC}"
@@ -141,6 +162,13 @@ echo "     (lien d'invitation dans discord.com/developers)"
 echo "  2. L'onboarding demarre automatiquement en DM"
 echo ""
 echo -e "  ${BLUE}Postiz :${NC} ${POSTIZ_URL}"
+if [[ "$ENABLE_HTTPS" == "true" ]]; then
+  echo -e "  ${BLUE}HTTPS :${NC}  Caddy (Let's Encrypt auto) pour ${POSTIZ_DOMAIN}"
+  echo -e "  ${GREEN}TikTok : active (HTTPS disponible)${NC}"
+else
+  echo -e "  ${YELLOW}TikTok : desactive (pas de HTTPS)${NC}"
+  echo "           Pour activer TikTok, relance avec un domaine."
+fi
 echo -e "  ${BLUE}Logs :${NC}   docker compose logs -f bot"
 echo -e "  ${BLUE}Stop :${NC}   docker compose down"
 echo -e "  ${BLUE}Update :${NC} docker compose pull && docker compose up -d"

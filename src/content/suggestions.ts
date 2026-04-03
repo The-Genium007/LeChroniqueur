@@ -4,6 +4,7 @@ import { getLogger } from '../core/logger.js';
 import type { SqliteDatabase } from '../core/database.js';
 import { formatProfileForPrompt } from '../feedback/preference-learner.js';
 import { personaLoader } from '../core/persona-loader.js';
+import { getProfile } from '../core/instance-profile.js';
 
 export interface GeneratedSuggestion {
   readonly hook: string;
@@ -31,7 +32,10 @@ const suggestionsResponseSchema = z.object({
   suggestions: z.array(suggestionItemSchema),
 });
 
-function loadPersona(): string {
+function loadPersona(instanceId?: string, db?: SqliteDatabase): string {
+  if (instanceId !== undefined && db !== undefined) {
+    return personaLoader.loadForInstance(instanceId, db);
+  }
   return personaLoader.loadLegacy();
 }
 
@@ -65,6 +69,7 @@ function buildSuggestionsPrompt(
   articles: readonly RecentArticle[],
   preferenceProfile: string,
   count: number,
+  db?: SqliteDatabase,
 ): string {
   const articleList = articles.map((a) => {
     const title = a.translated_title ?? a.title;
@@ -73,24 +78,28 @@ function buildSuggestionsPrompt(
     return `[ID:${String(a.id)}] ${title} (${a.source}, score ${String(a.score)}/10, ${a.category})\n  ${snippet}\n  Angle suggéré: ${angle}`;
   }).join('\n\n');
 
+  // Load instance profile for dynamic context
+  const profile = db !== undefined ? getProfile(db) : undefined;
+  const platforms = profile !== undefined && profile.targetPlatforms.length > 0
+    ? profile.targetPlatforms.join(', ')
+    : 'réseaux sociaux';
+  const pillars = profile !== undefined && profile.pillars.length > 0
+    ? profile.pillars.join(', ')
+    : 'trend, tuto, community, product';
+
   return [
     `Génère exactement ${String(count)} suggestions de contenu pour les réseaux sociaux.`,
-    '',
-    'CONTEXTE :',
-    '- Tu publies sur TikTok et Instagram en tant que Le Chroniqueur',
-    '- Ton audience : MJ et joueurs JDR francophones',
-    '- Le contenu doit respecter la "règle du pont" : chaque post DOIT contenir un lien vers le TTRPG ou Tumulte',
     '',
     preferenceProfile,
     '',
     'ARTICLES DE VEILLE RÉCENTS (utilise-les comme inspiration) :',
-    articleList.length > 0 ? articleList : '(aucun article récent — génère des suggestions basées sur tes connaissances JDR)',
+    articleList.length > 0 ? articleList : '(aucun article récent — génère des suggestions basées sur tes connaissances)',
     '',
     'POUR CHAQUE SUGGESTION, FOURNIS :',
-    '- hook : la phrase d\'accroche exacte (prête à publier, en français)',
+    '- hook : la phrase d\'accroche exacte (prête à publier)',
     '- script : le déroulé complet (seconde par seconde pour vidéo, slide par slide pour carrousel)',
-    '- pillar : "trend", "tuto", "community", ou "product"',
-    '- platform : "tiktok", "instagram", ou "both"',
+    `- pillar : un des piliers suivants : ${pillars}`,
+    `- platform : une des plateformes cibles (${platforms}) ou "both"`,
     '- format : "reel", "carousel", "story", ou "post"',
     '- hashtags : liste de hashtags pertinents',
     '- suggestedTime : heure de publication optimale (ex: "mardi 19h")',
@@ -99,10 +108,8 @@ function buildSuggestionsPrompt(
     'RÈGLES :',
     '- Le hook est TOUJOURS une anecdote ou une question, JAMAIS un pitch',
     '- La fin est TOUJOURS une punchline, une question au lecteur, ou un cliffhanger',
-    '- Tumulte est VISIBLE (captures d\'écran mentionnées) mais JAMAIS nommé en mode promo',
-    '- Tutoiement TOUJOURS',
-    '- N\'utilise JAMAIS ces mots : "solution", "innovant", "révolutionnaire", "découvrez", "n\'hésitez pas", "notre produit"',
-    '- Emojis autorisés : 🎲 ⚔️ 🐉 🔥 💀 📜 ✨',
+    '- Le contenu doit être authentique et engageant, pas promotionnel',
+    '- Respecte le ton et le vocabulaire définis dans le persona (mots interdits, emojis autorisés, etc.)',
     '',
     'Réponds UNIQUEMENT avec un JSON valide :',
     '{"suggestions": [{"hook": "...", "script": "...", "pillar": "...", "platform": "...", "format": "...", "hashtags": [...], "suggestedTime": "...", "sourceArticleId": N}]}',
@@ -112,14 +119,15 @@ function buildSuggestionsPrompt(
 export async function generateSuggestions(
   db: SqliteDatabase,
   count: number = 3,
+  instanceId?: string,
 ): Promise<readonly GeneratedSuggestion[]> {
   const logger = getLogger();
 
-  const persona = loadPersona();
+  const persona = loadPersona(instanceId, db);
   const preferenceProfile = formatProfileForPrompt(db);
   const articles = getRecentTopArticles(db);
 
-  const userMessage = buildSuggestionsPrompt(articles, preferenceProfile, count);
+  const userMessage = buildSuggestionsPrompt(articles, preferenceProfile, count, db);
 
   logger.debug({ articleCount: articles.length, count }, 'Generating suggestions');
 

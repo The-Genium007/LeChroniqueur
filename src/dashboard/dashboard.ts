@@ -79,6 +79,9 @@ export async function refreshDashboard(
  * Clean dashboard channel on boot — remove all messages except the permanent dashboard.
  * Prevents stale status messages ("✅ Veille lancée", "🔄 Dashboard rafraîchi", etc.)
  * from accumulating across bot restarts.
+ *
+ * Uses bulkDelete for recent messages (<14 days) and individual delete for older ones.
+ * Paginates through ALL messages in the channel, not just the first 50.
  */
 export async function cleanDashboardChannelOnBoot(
   channel: TextChannel,
@@ -87,12 +90,54 @@ export async function cleanDashboardChannelOnBoot(
   const logger = getLogger();
 
   try {
-    const messages = await channel.messages.fetch({ limit: 50 });
-    const toDelete = messages.filter((m: Message) => m.id !== permanentMessageId);
+    const botId = channel.client.user?.id;
+    let deleted = 0;
+    let lastId: string | undefined;
 
-    if (toDelete.size > 0) {
-      await channel.bulkDelete(toDelete);
-      logger.info({ count: toDelete.size, channelId: channel.id }, 'Dashboard channel cleaned on boot');
+    // Paginate through channel messages (100 at a time)
+    for (let page = 0; page < 5; page++) {
+      const options: { limit: number; before?: string } = { limit: 100 };
+      if (lastId !== undefined) options.before = lastId;
+
+      const messages = await channel.messages.fetch(options);
+      if (messages.size === 0) break;
+
+      const toDelete = messages.filter(
+        (m: Message) => m.id !== permanentMessageId && (botId === undefined || m.author.id === botId),
+      );
+
+      // Split into bulk-deletable (<14 days) and old messages
+      const fourteenDaysAgo = Date.now() - 14 * 24 * 60 * 60 * 1000;
+      const recent = toDelete.filter((m: Message) => m.createdTimestamp > fourteenDaysAgo);
+      const old = toDelete.filter((m: Message) => m.createdTimestamp <= fourteenDaysAgo);
+
+      if (recent.size > 1) {
+        try {
+          await channel.bulkDelete(recent);
+          deleted += recent.size;
+        } catch {
+          // Fallback to individual delete
+          for (const [, m] of recent) {
+            try { await m.delete(); deleted++; } catch { /* already deleted */ }
+          }
+        }
+      } else if (recent.size === 1) {
+        const single = recent.first();
+        if (single !== undefined) {
+          try { await single.delete(); deleted++; } catch { /* already deleted */ }
+        }
+      }
+
+      for (const [, m] of old) {
+        try { await m.delete(); deleted++; } catch { /* already deleted */ }
+      }
+
+      lastId = messages.last()?.id;
+      if (messages.size < 100) break;
+    }
+
+    if (deleted > 0) {
+      logger.info({ count: deleted, channelId: channel.id }, 'Dashboard channel cleaned on boot');
     }
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);

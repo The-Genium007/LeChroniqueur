@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
-import { getCategoriesFromDb, seedCategories, getDefaultCategories } from '../../src/veille/queries.js';
+import { getCategoriesFromDb } from '../../src/veille/queries.js';
 
 describe('queries DB functions', () => {
   let db: Database.Database;
@@ -22,10 +22,9 @@ describe('queries DB functions', () => {
   });
 
   describe('getCategoriesFromDb', () => {
-    it('should return hardcoded defaults when DB table is empty', () => {
+    it('should return empty array when DB table is empty', () => {
       const categories = getCategoriesFromDb(db);
-      expect(categories.length).toBeGreaterThan(0);
-      expect(categories[0]?.id).toBe('ttrpg_news');
+      expect(categories.length).toBe(0);
     });
 
     it('should return DB categories when populated', () => {
@@ -67,34 +66,6 @@ describe('queries DB functions', () => {
       const categories = getCategoriesFromDb(db);
       expect(categories[0]?.id).toBe('a');
       expect(categories[1]?.id).toBe('b');
-    });
-  });
-
-  describe('seedCategories', () => {
-    it('should seed default categories into empty table', () => {
-      seedCategories(db);
-      const count = db.prepare('SELECT COUNT(*) AS cnt FROM veille_categories').get() as { cnt: number };
-      const defaults = getDefaultCategories();
-      expect(count.cnt).toBe(defaults.length);
-    });
-
-    it('should not seed if table already has data', () => {
-      db.prepare(`
-        INSERT INTO veille_categories (id, label, keywords_en, keywords_fr, engines)
-        VALUES ('existing', 'Existing', '[]', '[]', '[]')
-      `).run();
-
-      seedCategories(db);
-
-      const count = db.prepare('SELECT COUNT(*) AS cnt FROM veille_categories').get() as { cnt: number };
-      expect(count.cnt).toBe(1);
-    });
-
-    it('should preserve sort order', () => {
-      seedCategories(db);
-      const first = db.prepare('SELECT id FROM veille_categories ORDER BY sort_order ASC LIMIT 1').get() as { id: string };
-      const defaults = getDefaultCategories();
-      expect(first.id).toBe(defaults[0]?.id);
     });
   });
 });

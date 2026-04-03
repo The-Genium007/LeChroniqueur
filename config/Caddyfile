@@ -1,0 +1,8 @@
+# Caddyfile — Reverse proxy for Postiz with automatic HTTPS (Let's Encrypt)
+#
+# {$POSTIZ_DOMAIN} is replaced by the POSTIZ_DOMAIN env var at runtime.
+# Caddy will automatically obtain and renew a TLS certificate for this domain.
+
+{$POSTIZ_DOMAIN} {
+	reverse_proxy postiz:5000
+}

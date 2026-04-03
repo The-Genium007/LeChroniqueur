@@ -54,10 +54,25 @@ export function getGlobalDatabase(): SqliteDatabase {
 
 const _instanceDbs = new Map<string, SqliteDatabase>();
 
+export function closeInstanceDatabase(instanceId: string): void {
+  const db = _instanceDbs.get(instanceId);
+  if (db !== undefined) {
+    try { db.close(); } catch { /* already closed */ }
+    _instanceDbs.delete(instanceId);
+  }
+}
+
 export function createInstanceDatabase(instanceId: string, dbPath?: string): SqliteDatabase {
   const existing = _instanceDbs.get(instanceId);
   if (existing !== undefined) {
-    return existing;
+    // Check if the connection is still open
+    try {
+      existing.prepare('SELECT 1').get();
+      return existing;
+    } catch {
+      // Connection is closed — remove stale reference and reopen
+      _instanceDbs.delete(instanceId);
+    }
   }
 
   const logger = getLogger();
@@ -90,59 +105,9 @@ export function getInstanceDatabase(instanceId: string): SqliteDatabase {
   return db;
 }
 
-// ─── Legacy API (backward compat with existing code) ───
-
-let _legacyDb: SqliteDatabase | undefined;
-
-/**
- * Legacy API — creates a single database at the given path.
- * Used by existing code (index.ts, handlers, dry-run).
- * In Phase 3+, this will be replaced by createInstanceDatabase().
- */
-export function createDatabase(dbPath?: string): SqliteDatabase {
-  if (_legacyDb !== undefined) {
-    return _legacyDb;
-  }
-
-  const logger = getLogger();
-  const resolvedPath = dbPath ?? path.join(process.cwd(), 'data', 'tumulte.db');
-
-  // Ensure directory exists
-  const dir = path.dirname(resolvedPath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-
-  logger.info({ path: resolvedPath }, 'Opening SQLite database');
-
-  _legacyDb = new Database(resolvedPath);
-  applyPragmas(_legacyDb);
-  runMigrations(_legacyDb);
-
-  logger.info('Database initialized and migrations applied');
-
-  return _legacyDb;
-}
-
-export function getDatabase(): SqliteDatabase {
-  if (_legacyDb === undefined) {
-    throw new Error('Database not created. Call createDatabase() first.');
-  }
-  return _legacyDb;
-}
-
 // ─── Shutdown ───
 
-export function closeDatabase(): void {
-  if (_legacyDb !== undefined) {
-    _legacyDb.close();
-    _legacyDb = undefined;
-  }
-}
-
 export function closeAllDatabases(): void {
-  closeDatabase();
-
   if (_globalDb !== undefined) {
     _globalDb.close();
     _globalDb = undefined;

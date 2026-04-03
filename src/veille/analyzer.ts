@@ -3,6 +3,7 @@ import { complete } from '../services/anthropic.js';
 import { getLogger } from '../core/logger.js';
 import type { RawArticle } from './collector.js';
 import type { V2PreferenceEntry as PreferenceEntryData } from '../discord/component-builder-v2.js';
+import type { InstanceProfile } from '../core/instance-profile.js';
 
 export interface AnalyzedArticle extends RawArticle {
   readonly score: number;
@@ -16,19 +17,6 @@ export interface AnalysisResult {
   readonly articles: readonly AnalyzedArticle[];
   readonly tokensUsed: { readonly input: number; readonly output: number };
 }
-
-const analysisItemSchema = z.object({
-  url: z.string(),
-  score: z.number().int().min(0).max(10),
-  pillar: z.enum(['trend', 'tuto', 'community', 'product']),
-  suggestedAngle: z.string(),
-  translatedTitle: z.string().optional(),
-  translatedSnippet: z.string().optional(),
-});
-
-const analysisResponseSchema = z.object({
-  articles: z.array(analysisItemSchema),
-});
 
 function buildPreferenceContext(preferences: readonly PreferenceEntryData[]): string {
   if (preferences.length === 0) {
@@ -64,9 +52,23 @@ function buildPreferenceContext(preferences: readonly PreferenceEntryData[]): st
   return lines.join('\n');
 }
 
+function buildCalibratedExamplesContext(profile?: InstanceProfile): string {
+  if (profile?.calibratedExamples === null || profile?.calibratedExamples === undefined || profile.calibratedExamples.length === 0) {
+    return '';
+  }
+
+  const lines = ['', 'Exemples de scoring calibrés pour cette niche :'];
+  for (const ex of profile.calibratedExamples.slice(0, 10)) {
+    lines.push(`  - "${ex.title}" → score ${String(ex.expectedScore)} (${ex.reasoning})`);
+  }
+
+  return lines.join('\n');
+}
+
 function buildAnalysisPrompt(
   articles: readonly RawArticle[],
   preferenceContext: string,
+  profile?: InstanceProfile,
 ): string {
   const articleList = articles.map((a, i) => {
     return [
@@ -79,14 +81,42 @@ function buildAnalysisPrompt(
     ].join('\n');
   }).join('\n\n');
 
+  const pillars = profile?.pillars ?? ['trend', 'tuto', 'community', 'product'];
+  const calibrated = buildCalibratedExamplesContext(profile);
+
+  const contextSection = profile !== undefined && profile.onboardingContext.length > 0
+    ? `\nContexte du projet :\n${profile.onboardingContext}\n`
+    : '';
+
+  const contentTypesSection = profile !== undefined && profile.contentTypes.length > 0
+    ? `\nTypes de contenu recherchés : ${profile.contentTypes.join(', ')}`
+    : '';
+
+  const platformsSection = profile !== undefined && profile.targetPlatforms.length > 0
+    ? `\nPlateformes cibles : ${profile.targetPlatforms.join(', ')}`
+    : '';
+
   return [
-    'Analyse les articles suivants pour un créateur de contenu TTRPG/JDR francophone.',
+    'Analyse les articles suivants pour la création de contenu sur les réseaux sociaux.',
+    contextSection,
+    contentTypesSection,
+    platformsSection,
     '',
     preferenceContext,
+    calibrated,
+    '',
+    'RÈGLES DE SCORING :',
+    '- Le score 5 est INTERDIT. Tu DOIS trancher : 4 (pas assez pertinent) ou 6 (assez pertinent).',
+    '- Score 0-2 : hors-sujet, aucun rapport avec la niche',
+    '- Score 3-4 : vaguement lié mais pas exploitable pour du contenu',
+    '- Score 6-7 : pertinent, exploitable avec un bon angle',
+    '- Score 8-10 : très pertinent, fort potentiel viral/engagement',
+    '',
+    `Les pilliers de contenu sont : ${pillars.join(', ')}`,
     '',
     'Pour chaque article, fournis :',
-    '- score (0-10) : pertinence pour créer du contenu JDR/Tumulte',
-    '- pillar : "trend", "tuto", "community", ou "product"',
+    '- score (0-10, PAS de 5)',
+    `- pillar : un des pilliers ci-dessus (${pillars.join(', ')})`,
     '- suggestedAngle : un angle de contenu accrocheur en français (1-2 phrases)',
     '- translatedTitle : traduction FR du titre si l\'article est en anglais',
     '- translatedSnippet : traduction FR du snippet si l\'article est en anglais',
@@ -97,16 +127,40 @@ function buildAnalysisPrompt(
     'Articles à analyser :',
     '',
     articleList,
-  ].join('\n');
+  ].filter((l) => l.length > 0).join('\n');
 }
 
-const SYSTEM_PROMPT = `Tu es un analyste de veille spécialisé dans le JDR/TTRPG et la création de contenu pour les réseaux sociaux.
-Tu analyses des articles pour un créateur francophone qui publie sur TikTok et Instagram sous le persona d'un MJ légendaire.
+const DEFAULT_SYSTEM_PROMPT = `Tu es un analyste de veille spécialisé dans la création de contenu pour les réseaux sociaux.
 Réponds toujours en JSON valide. Pas de texte avant ou après le JSON.`;
+
+function buildSystemPrompt(persona?: string, profile?: InstanceProfile): string {
+  const nicheContext = profile !== undefined && profile.projectNiche.length > 0
+    ? `pour le projet "${profile.projectName}" dans la niche "${profile.projectNiche}"`
+    : '';
+
+  if (persona !== undefined && persona.length > 0) {
+    return [
+      persona.slice(0, 1500),
+      '',
+      `En tant qu'analyste de veille ${nicheContext}, tu évalues la pertinence des articles pour créer du contenu sur les réseaux sociaux dans TA niche.`,
+      'Score les articles selon leur potentiel à devenir du contenu engageant pour TON audience.',
+      'Un article hors-sujet par rapport à ta niche doit recevoir un score de 0-2.',
+      'Un article vaguement lié reçoit 3-4.',
+      'Un article très pertinent avec un fort potentiel de contenu reçoit 7-10.',
+      'Le score 5 est INTERDIT — tranche entre 4 et 6.',
+      '',
+      'Réponds toujours en JSON valide. Pas de texte avant ou après le JSON.',
+    ].join('\n');
+  }
+
+  return DEFAULT_SYSTEM_PROMPT;
+}
 
 export async function analyze(
   articles: readonly RawArticle[],
   preferences: readonly PreferenceEntryData[],
+  persona?: string,
+  profile?: InstanceProfile,
 ): Promise<AnalysisResult> {
   const logger = getLogger();
 
@@ -115,17 +169,32 @@ export async function analyze(
   }
 
   const preferenceContext = buildPreferenceContext(preferences);
-  const userMessage = buildAnalysisPrompt(articles, preferenceContext);
+  const userMessage = buildAnalysisPrompt(articles, preferenceContext, profile);
+  const systemPrompt = buildSystemPrompt(persona, profile);
 
-  logger.debug({ articleCount: articles.length }, 'Analyzing articles with Claude');
+  logger.debug({ articleCount: articles.length, hasPersona: persona !== undefined, hasProfile: profile !== undefined }, 'Analyzing articles');
 
-  const response = await complete(SYSTEM_PROMPT, userMessage, {
-    maxTokens: 4096,
+  const response = await complete(systemPrompt, userMessage, {
+    maxTokens: 8192,
     temperature: 0.3,
   });
 
-  // Parse and validate the JSON response
-  let parsed: z.infer<typeof analysisResponseSchema>;
+  // Parse the JSON response — validate per-article (not all-or-nothing)
+  const pillars = profile?.pillars ?? ['trend', 'tuto', 'community', 'product'];
+  const pillarSet = new Set(pillars);
+  const defaultPillar = pillars[0] ?? 'trend';
+
+  // Lenient per-article schema: accepts any string for pillar (we validate manually)
+  const lenientItemSchema = z.object({
+    url: z.string(),
+    score: z.number(),
+    pillar: z.string(),
+    suggestedAngle: z.string(),
+    translatedTitle: z.string().optional(),
+    translatedSnippet: z.string().optional(),
+  });
+
+  const rawArticles: z.infer<typeof lenientItemSchema>[] = [];
 
   try {
     // Extract JSON from response (Claude might add backticks)
@@ -141,8 +210,24 @@ export async function analyze(
     }
     jsonText = jsonText.trim();
 
-    const raw: unknown = JSON.parse(jsonText);
-    parsed = analysisResponseSchema.parse(raw);
+    const raw = JSON.parse(jsonText) as Record<string, unknown>;
+    const articlesArray = Array.isArray(raw['articles']) ? raw['articles'] : [];
+
+    // Validate each article individually — skip invalid ones instead of failing the whole batch
+    for (const item of articlesArray) {
+      const result = lenientItemSchema.safeParse(item);
+      if (result.success) {
+        const parsed = result.data;
+        // Clamp score to 0-10, skip 5 (round to 4 or 6)
+        let score = Math.max(0, Math.min(10, Math.round(parsed.score)));
+        if (score === 5) score = 4;
+        // Validate pillar — fallback to default if LLM invented one
+        const pillar = pillarSet.has(parsed.pillar) ? parsed.pillar : defaultPillar;
+        rawArticles.push({ ...parsed, score, pillar });
+      } else {
+        logger.debug({ error: result.error.message, item: JSON.stringify(item).slice(0, 200) }, 'Skipping invalid article in LLM response');
+      }
+    }
   } catch (error) {
     logger.error(
       { error: error instanceof Error ? error.message : String(error), response: response.text.slice(0, 500) },
@@ -152,8 +237,8 @@ export async function analyze(
     return {
       articles: articles.map((a) => ({
         ...a,
-        score: 5,
-        pillar: 'trend' as const,
+        score: 0,
+        pillar: defaultPillar,
         suggestedAngle: '',
       })),
       tokensUsed: { input: response.tokensIn, output: response.tokensOut },
@@ -161,7 +246,7 @@ export async function analyze(
   }
 
   // Merge analysis results with original articles
-  const analyzedMap = new Map(parsed.articles.map((a) => [a.url, a]));
+  const analyzedMap = new Map(rawArticles.map((a) => [a.url, a]));
 
   const analyzedArticles: AnalyzedArticle[] = articles.map((article) => {
     const analysis = analyzedMap.get(article.url);
@@ -169,8 +254,8 @@ export async function analyze(
     if (analysis === undefined) {
       return {
         ...article,
-        score: 5,
-        pillar: 'trend' as const,
+        score: 0,
+        pillar: defaultPillar,
         suggestedAngle: '',
       };
     }

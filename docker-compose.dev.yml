@@ -39,16 +39,19 @@ services:
         condition: service_healthy
       postiz-redis:
         condition: service_healthy
+      temporal:
+        condition: service_started
     ports:
       - "5100:5000"
     environment:
       DATABASE_URL: "postgresql://postiz:postiz@postiz-db:5432/postiz"
       REDIS_URL: "redis://postiz-redis:6379"
-      JWT_SIGNING_KEY: "dev-jwt-signing-key-not-for-production"
+      JWT_SECRET: "dev-jwt-signing-key-not-for-production"
       MAIN_URL: "http://localhost:5100"
       FRONTEND_URL: "http://localhost:5100"
       NEXT_PUBLIC_BACKEND_URL: "http://localhost:5100/api"
-      BACKEND_INTERNAL_URL: "http://postiz:5000"
+      BACKEND_INTERNAL_URL: "http://localhost:5000"
+      TEMPORAL_ADDRESS: "temporal:7233"
       IS_GENERAL: "true"
       STORAGE_PROVIDER: "local"
       UPLOAD_DIRECTORY: "/uploads"
@@ -57,6 +60,66 @@ services:
       - postiz_uploads:/uploads
     networks:
       - dev
+
+  # ─── Temporal (workflow engine requis par Postiz v2.12+) ───
+  temporal:
+    image: temporalio/auto-setup:latest
+    container_name: lechroniqueur-temporal
+    restart: unless-stopped
+    environment:
+      DB: "postgres12"
+      DB_PORT: "5432"
+      POSTGRES_USER: "temporal"
+      POSTGRES_PWD: "temporal"
+      POSTGRES_SEEDS: "temporal-db"
+      ENABLE_ES: "true"
+      ES_SEEDS: "temporal-es"
+      ES_VERSION: "v7"
+    depends_on:
+      temporal-db:
+        condition: service_healthy
+      temporal-es:
+        condition: service_healthy
+    networks:
+      - dev
+
+  # ─── PostgreSQL (BDD Temporal) ───
+  temporal-db:
+    image: postgres:16-alpine
+    container_name: lechroniqueur-temporal-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "temporal"
+      POSTGRES_HOST_AUTH_METHOD: "trust"
+    volumes:
+      - temporal_db:/var/lib/postgresql/data
+    networks:
+      - dev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ─── Elasticsearch (search attributes Temporal) ───
+  temporal-es:
+    image: elasticsearch:7.17.27
+    container_name: lechroniqueur-temporal-es
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms256m -Xmx256m
+    volumes:
+      - temporal_es:/usr/share/elasticsearch/data
+    networks:
+      - dev
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
 
   # ─── PostgreSQL (BDD Postiz) ───
   postiz-db:
@@ -100,6 +163,8 @@ volumes:
   postiz_uploads:
   postiz_db:
   postiz_redis:
+  temporal_db:
+  temporal_es:
 
 networks:
   dev:

@@ -1,11 +1,4 @@
-import { search as searxngSearch, type SearxngResult } from '../services/searxng.js';
-import type { SqliteDatabase } from '../core/database.js';
-import { getLogger } from '../core/logger.js';
-import {
-  getCategories,
-  buildSearxngQueries,
-  type VeilleCategory,
-} from './queries.js';
+import type { SearxngResult } from '../services/searxng.js';
 
 export interface RawArticle {
   readonly url: string;
@@ -30,7 +23,7 @@ export interface CollectorStats {
   readonly kept: number;
 }
 
-function resultToArticle(
+export function resultToArticle(
   result: SearxngResult,
   language: string,
   category: string,
@@ -47,7 +40,7 @@ function resultToArticle(
   };
 }
 
-function isWithinMaxAge(publishedDate: string | undefined, maxAgeHours: number): boolean {
+export function isWithinMaxAge(publishedDate: string | undefined, maxAgeHours: number): boolean {
   if (publishedDate === undefined) {
     return true;
   }
@@ -68,97 +61,4 @@ function isWithinMaxAge(publishedDate: string | undefined, maxAgeHours: number):
   const ageHours = (now.getTime() - published.getTime()) / (1000 * 60 * 60);
   // Be generous: allow 2x the max age to avoid filtering too aggressively
   return ageHours <= maxAgeHours * 2;
-}
-
-export async function collect(
-  db: SqliteDatabase,
-  categories?: readonly VeilleCategory[],
-): Promise<CollectorResult> {
-  const logger = getLogger();
-  const cats = categories ?? getCategories();
-
-  const allArticles: RawArticle[] = [];
-  let totalFetched = 0;
-
-  for (const category of cats) {
-    const queries = buildSearxngQueries(category);
-
-    for (const q of queries) {
-      try {
-        const results = await searxngSearch(q.query, {
-          engines: q.engines,
-          language: q.language,
-          timeRange: 'week',
-        });
-
-        totalFetched += results.length;
-
-        let filteredCount = 0;
-        for (const result of results) {
-          if (isWithinMaxAge(result.publishedDate, category.maxAgeHours)) {
-            allArticles.push(resultToArticle(result, q.language, q.category));
-          } else {
-            filteredCount++;
-          }
-        }
-        if (filteredCount > 0) {
-          logger.debug({ query: q.query, total: results.length, filtered: filteredCount }, 'Articles filtered by age');
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        logger.warn({ query: q.query, error: message }, 'SearXNG query failed, skipping');
-      }
-    }
-  }
-
-  // Deduplicate by URL
-  const seenUrls = new Set<string>();
-  const uniqueArticles: RawArticle[] = [];
-
-  for (const article of allArticles) {
-    if (seenUrls.has(article.url)) {
-      continue;
-    }
-    seenUrls.add(article.url);
-    uniqueArticles.push(article);
-  }
-
-  const deduplicatedInBatch = allArticles.length - uniqueArticles.length;
-
-  // Deduplicate against database (articles already collected)
-  const existingUrls = new Set<string>();
-  const existingStmt = db.prepare('SELECT url FROM veille_articles WHERE url = ?');
-
-  const newArticles: RawArticle[] = [];
-
-  for (const article of uniqueArticles) {
-    const existing = existingStmt.get(article.url) as { url: string } | undefined;
-    if (existing !== undefined) {
-      existingUrls.add(article.url);
-    } else {
-      newArticles.push(article);
-    }
-  }
-
-  const deduplicatedFromDb = existingUrls.size;
-  const totalDeduplicated = deduplicatedInBatch + deduplicatedFromDb;
-
-  logger.info(
-    {
-      totalFetched,
-      deduplicated: totalDeduplicated,
-      kept: newArticles.length,
-    },
-    'Veille collection complete',
-  );
-
-  return {
-    articles: newArticles,
-    stats: {
-      totalFetched,
-      deduplicated: totalDeduplicated,
-      filtered: totalFetched - newArticles.length - totalDeduplicated,
-      kept: newArticles.length,
-    },
-  };
 }

@@ -92,15 +92,45 @@ export async function generateCategories(
       '',
       catList,
       '',
-      `*Tokens : ${String(session.tokensUsed)} · Itérations : ${String(session.iterationCount)}/20*`,
     ].join('\n')));
     c.addSeparatorComponents(sep());
     c.addActionRowComponents(row(
       btn('wizard:next', 'Valider et tester', ButtonStyle.Success, '✅'),
       btn('wizard:modify', 'Modifier', ButtonStyle.Primary, '✏️'),
       btn('wizard:redo', 'Régénérer', ButtonStyle.Secondary, '🔄'),
+      btn('wizard:back', 'Retour', ButtonStyle.Secondary, '◀️'),
     ));
   })]);
 
   return { categories, message };
+}
+
+/**
+ * Display existing categories without regenerating them.
+ * Used after modifications to show the updated list.
+ */
+export function buildCategoriesDisplay(session: WizardSession): V2MessagePayload {
+  const categories = session.data.categories ?? [];
+
+  const catList = categories.map((cat, i) =>
+    `**${String(i + 1)}.** ${cat.label} (\`${cat.id}\`)\n   EN: ${cat.keywords.en.slice(0, 3).join(', ')}\n   FR: ${cat.keywords.fr.slice(0, 3).join(', ')}`,
+  ).join('\n\n');
+
+  return v2([buildContainer(getColor('primary'), (c) => {
+    c.addTextDisplayComponents(txt([
+      `## 🤖 Wizard IA — Étape ${getStepLabel(session.step)}`,
+      '',
+      `**${String(categories.length)} catégories de veille** :`,
+      '',
+      catList,
+      '',
+    ].join('\n')));
+    c.addSeparatorComponents(sep());
+    c.addActionRowComponents(row(
+      btn('wizard:next', 'Valider et tester', ButtonStyle.Success, '✅'),
+      btn('wizard:modify', 'Modifier', ButtonStyle.Primary, '✏️'),
+      btn('wizard:redo', 'Régénérer', ButtonStyle.Secondary, '🔄'),
+      btn('wizard:back', 'Retour', ButtonStyle.Secondary, '◀️'),
+    ));
+  })]);
 }

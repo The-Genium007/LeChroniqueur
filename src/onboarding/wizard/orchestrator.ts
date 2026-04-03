@@ -23,7 +23,29 @@ import { buildDescribePrompt } from './describe.js';
 import { generateCategories } from './categories.js';
 import { dryRunCategories } from './dryrun.js';
 import { buildToneSelection, setTone, generatePersonaSection, assemblePersona, buildNeutralPersona } from './persona.js';
-import { buildPlatformSelection, buildScheduleConfig, togglePlatform } from './platforms.js';
+import { buildPlatformSelection, buildScheduleConfig, togglePlatform, setScheduleMode, setVeilleDay, togglePublicationDay } from './platforms.js';
+import {
+  buildSourcesSelection,
+  toggleSource,
+  buildRssConfigModal,
+  buildRedditConfigModal,
+  buildYouTubeConfigModal,
+  miniDryRunSources,
+} from './sources.js';
+import {
+  buildProviderSelection,
+  buildModelSelection,
+  buildApiKeyModal,
+  buildCustomModelModal,
+  buildValidationResult,
+  setLlmProvider,
+  setLlmModel,
+  setLlmApiKey,
+  setLlmBaseUrl,
+  getLlmSessionConfig,
+} from './llm-selection.js';
+import { validateLlmKey } from '../api-keys.js';
+import { getProvider as getLlmProvider } from '../../services/llm-providers.js';
 import { buildConfirmation } from './confirm.js';
 import { validateAnthropicKey, validateGoogleAiKey, storeInstanceSecret } from '../api-keys.js';
 import {
@@ -38,7 +60,9 @@ import {
   verifyPostizIntegrations,
 } from '../postiz-setup.js';
 import { validateInfrastructure, createInfrastructure, registerChannels } from '../infrastructure.js';
-import { seedCategories } from '../../veille/queries.js';
+import { saveProfile, upsertConfigOverride } from '../../core/instance-profile.js';
+import { upsertSource } from '../../veille/sources/index.js';
+import { saveScheduleConfig } from '../../core/scheduler-weekly.js';
 import { buildSearchInterface } from '../../dashboard/search.js';
 import { buildDashboardHome, collectDashboardHomeData } from '../../dashboard/pages/home.js';
 import {
@@ -180,20 +204,23 @@ export async function handleWizardInteraction(
       return;
     }
 
-    let session = getActiveWizardSession(globalDb, guildId, interaction.user.id);
-    if (session !== undefined) {
-      const payload = buildResumePrompt(session);
-      await sendWizardDM(interaction, payload, session);
-      saveWizardSession(globalDb, session);
-      return;
+    // Defer immediately — cleanup can take a while
+    await interaction.deferReply({ ephemeral: true });
+
+    // If a session already exists, clean it up and start fresh
+    const existingSession = getActiveWizardSession(globalDb, guildId, interaction.user.id);
+    if (existingSession !== undefined) {
+      await cleanupWizardDMs(interaction.user, existingSession);
+      deleteWizardSession(globalDb, existingSession.id);
     }
 
-    session = createWizardSession(globalDb, guildId, interaction.user.id);
+    const session = createWizardSession(globalDb, guildId, interaction.user.id);
     saveWizardSession(globalDb, session);
-
-    // Start with API key collection (Modal)
-    const modal = buildAnthropicKeyModal();
-    await interaction.showModal(modal);
+    const providerPayload = buildProviderSelection(session);
+    const providerMsg = await interaction.user.send({ components: providerPayload.components as never[], flags: providerPayload.flags });
+    trackDmMessageId(session, providerMsg.id);
+    saveWizardSession(globalDb, session);
+    try { await interaction.editReply({ content: '📩 Check tes DMs !' }); } catch { /* expired */ }
     return;
   }
 
@@ -213,14 +240,31 @@ export async function handleWizardInteraction(
     const session = createWizardSession(globalDb, guildId, interaction.user.id);
     (session.data as Record<string, unknown>)['_importMode'] = true;
     saveWizardSession(globalDb, session);
-    // Start with API key collection same as normal
-    await interaction.showModal(buildAnthropicKeyModal());
+    // Start with LLM provider selection same as normal
+    await interaction.deferReply({ ephemeral: true });
+    const importProviderPayload = buildProviderSelection(session);
+    const importProviderMsg = await interaction.user.send({ components: importProviderPayload.components as never[], flags: importProviderPayload.flags });
+    trackDmMessageId(session, importProviderMsg.id);
+    saveWizardSession(globalDb, session);
+    try { await interaction.editReply({ content: '📩 Check tes DMs !' }); } catch { /* expired */ }
     return;
   }
 
   // ─── onboard:key:* — API key entry buttons ───
   if (customId === 'onboard:key:anthropic') {
-    await interaction.showModal(buildAnthropicKeyModal());
+    // Legacy button — redirect to new LLM provider selection
+    const session = findSessionForUser(globalDb, interaction);
+    if (session !== undefined) {
+      setLlmProvider(session, 'anthropic');
+      session.data.llmProvider = 'anthropic';
+      saveWizardSession(globalDb, session);
+      const payload = buildModelSelection(session);
+      await interaction.deferReply({ ephemeral: true });
+      const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+      trackDmMessageId(session, sentMsg.id);
+      saveWizardSession(globalDb, session);
+      try { await interaction.editReply({ content: '✅' }); interaction.deleteReply().catch(() => {}); } catch { /* expired */ }
+    }
     return;
   }
 
@@ -414,7 +458,25 @@ export async function handleWizardInteraction(
   } else if (customId === 'wizard:back') {
     await handleWizardBack(interaction, session, globalDb);
   } else if (customId === 'wizard:modify') {
-    await interaction.reply({ content: '✏️ Envoie ta modification en texte.', ephemeral: true });
+    // Mark session as awaiting modification
+    (session.data as Record<string, unknown>)['_awaitingModification'] = true;
+    saveWizardSession(globalDb, session);
+
+    const stepHints: Record<string, string> = {
+      describe_project: 'Décris ce que tu veux changer (nom, niche, plateformes, etc.)',
+      review_categories: 'Ex: "retire la catégorie 7" ou "ajoute une catégorie sur les conventions" ou "change les keywords de la catégorie 3"',
+      review_persona_identity: 'Ex: "rends le persona plus mystérieux" ou "change le nom en ..."',
+      review_persona_tone: 'Ex: "moins de sarcasme, plus pédagogue"',
+      review_persona_vocabulary: 'Ex: "ajoute l\'expression ..." ou "retire le mot interdit ..."',
+      review_persona_art_direction: 'Ex: "utilise du bleu au lieu du violet" ou "palette plus sombre"',
+      review_persona_examples: 'Ex: "le post TikTok est trop long" ou "change le ton du tweet"',
+    };
+
+    const hint = stepHints[session.step] ?? 'Décris les changements que tu veux apporter.';
+    await interaction.reply({
+      content: `✏️ **Envoie ta modification dans ce chat.**\n\n${hint}\n\n_Le bot va régénérer le contenu avec tes instructions._`,
+      ephemeral: true,
+    });
   } else if (customId === 'wizard:confirm') {
     await handleWizardConfirm(interaction, session, globalDb, registry);
   } else if (customId === 'wizard:cancel') {
@@ -519,26 +581,174 @@ export async function handleWizardInteraction(
     if (!interaction.replied && !interaction.deferred) {
       try { await interaction.deferUpdate(); } catch { /* expired */ }
     }
+
+  // ─── Project describe modal button ───
+  } else if (customId === 'wizard:describe:modal') {
+    const { buildDescribeModal } = await import('./describe.js');
+    await interaction.showModal(buildDescribeModal());
+
+  // ─── Refine validate button ───
+  } else if (customId === 'wizard:refine:validate') {
+    // Check if answers were already processed by the DM handler
+    if (session.data.onboardingContext !== undefined && session.data.onboardingContext.length > 0) {
+      // Already processed — just show validation if not already shown
+      if (session.step === 'refine_project') {
+        try { await interaction.deferReply({ ephemeral: true }); } catch { /* expired */ }
+        const { buildProfileValidation } = await import('./refine-project.js');
+        advanceStep(session);
+        saveWizardSession(globalDb, session);
+        const payload = buildProfileValidation(session);
+        const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+        trackDmMessageId(session, sentMsg.id);
+        saveWizardSession(globalDb, session);
+        try { interaction.deleteReply().catch(() => {}); } catch { /* expired */ }
+      } else {
+        // Already advanced — just dismiss the button
+        if (!interaction.replied && !interaction.deferred) {
+          try { await interaction.deferUpdate(); } catch { /* expired */ }
+        }
+      }
+    } else {
+      await interaction.reply({ content: '⚠️ Envoie d\'abord tes réponses aux questions dans le chat, puis clique sur Valider.', ephemeral: true });
+    }
+
+  // ─── Source selection buttons ───
+  } else if (customId.startsWith('wizard:source:toggle:')) {
+    const sourceId = customId.replace('wizard:source:toggle:', '');
+    toggleSource(session, sourceId);
+    saveWizardSession(globalDb, session);
+    const payload = buildSourcesSelection(session);
+    try { await interaction.message.delete(); } catch { /* already deleted */ }
+    const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+    trackDmMessageId(session, sentMsg.id);
+    saveWizardSession(globalDb, session);
+    if (!interaction.replied && !interaction.deferred) {
+      try { await interaction.deferUpdate(); } catch { /* expired */ }
+    }
+
+  } else if (customId === 'wizard:source:config:rss') {
+    await interaction.showModal(buildRssConfigModal());
+
+  } else if (customId === 'wizard:source:config:reddit') {
+    await interaction.showModal(buildRedditConfigModal());
+
+  } else if (customId === 'wizard:source:config:youtube_transcript') {
+    await interaction.showModal(buildYouTubeConfigModal());
+
+  // ─── Schedule buttons ───
+  } else if (customId === 'wizard:schedule:mode:weekly' || customId === 'wizard:schedule:mode:daily') {
+    const mode = customId === 'wizard:schedule:mode:weekly' ? 'weekly' : 'daily';
+    setScheduleMode(session, mode);
+    saveWizardSession(globalDb, session);
+    const payload = buildScheduleConfig(session);
+    try { await interaction.message.delete(); } catch { /* already deleted */ }
+    const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+    trackDmMessageId(session, sentMsg.id);
+    saveWizardSession(globalDb, session);
+    if (!interaction.replied && !interaction.deferred) {
+      try { await interaction.deferUpdate(); } catch { /* expired */ }
+    }
+
+  } else if (customId.startsWith('wizard:schedule:day:')) {
+    const day = parseInt(customId.replace('wizard:schedule:day:', ''), 10);
+    setVeilleDay(session, day);
+    saveWizardSession(globalDb, session);
+    const payload = buildScheduleConfig(session);
+    try { await interaction.message.delete(); } catch { /* already deleted */ }
+    const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+    trackDmMessageId(session, sentMsg.id);
+    saveWizardSession(globalDb, session);
+    if (!interaction.replied && !interaction.deferred) {
+      try { await interaction.deferUpdate(); } catch { /* expired */ }
+    }
+
+  } else if (customId.startsWith('wizard:schedule:pub:')) {
+    const day = parseInt(customId.replace('wizard:schedule:pub:', ''), 10);
+    togglePublicationDay(session, day);
+    saveWizardSession(globalDb, session);
+    const payload = buildScheduleConfig(session);
+    try { await interaction.message.delete(); } catch { /* already deleted */ }
+    const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+    trackDmMessageId(session, sentMsg.id);
+    saveWizardSession(globalDb, session);
+    if (!interaction.replied && !interaction.deferred) {
+      try { await interaction.deferUpdate(); } catch { /* expired */ }
+    }
+
+  // ─── LLM Provider selection buttons ───
+  } else if (customId.startsWith('wizard:llm:provider:')) {
+    const providerId = customId.split(':')[3] ?? '';
+    setLlmProvider(session, providerId);
+    session.data.llmProvider = providerId;
+    saveWizardSession(globalDb, session);
+    // Show model selection for this provider
+    const payload = buildModelSelection(session);
+    try { await interaction.message.delete(); } catch { /* already deleted */ }
+    const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+    trackDmMessageId(session, sentMsg.id);
+    saveWizardSession(globalDb, session);
+    if (!interaction.replied && !interaction.deferred) {
+      try { await interaction.deferUpdate(); } catch { /* expired */ }
+    }
+
+  } else if (customId.startsWith('wizard:llm:model:') && customId !== 'wizard:llm:model:custom') {
+    const modelId = customId.replace('wizard:llm:model:', '');
+    setLlmModel(session, modelId);
+    session.data.llmModel = modelId;
+    saveWizardSession(globalDb, session);
+    // Refresh model selection UI
+    const payload = buildModelSelection(session);
+    try { await interaction.message.delete(); } catch { /* already deleted */ }
+    const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+    trackDmMessageId(session, sentMsg.id);
+    saveWizardSession(globalDb, session);
+    if (!interaction.replied && !interaction.deferred) {
+      try { await interaction.deferUpdate(); } catch { /* expired */ }
+    }
+
+  } else if (customId === 'wizard:llm:model:custom') {
+    const modal = buildCustomModelModal(session);
+    await interaction.showModal(modal);
+
+  } else if (customId === 'wizard:llm:next') {
+    // Model selected → show API key modal
+    const modal = buildApiKeyModal(session);
+    await interaction.showModal(modal);
+
+  } else if (customId === 'wizard:llm:retry') {
+    // Retry API key entry
+    const modal = buildApiKeyModal(session);
+    await interaction.showModal(modal);
+
+  } else if (customId === 'wizard:llm:back') {
+    // Go back to provider selection
+    const payload = buildProviderSelection(session);
+    try { await interaction.message.delete(); } catch { /* already deleted */ }
+    const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+    trackDmMessageId(session, sentMsg.id);
+    saveWizardSession(globalDb, session);
+    if (!interaction.replied && !interaction.deferred) {
+      try { await interaction.deferUpdate(); } catch { /* expired */ }
+    }
+
+  } else if (customId === 'wizard:llm:confirmed') {
+    // LLM confirmed → ask for Google AI key (same flow as after old Anthropic key validation)
+    if (!interaction.replied && !interaction.deferred) {
+      await interaction.deferReply({ ephemeral: true });
+    }
+    try { await interaction.message.delete(); } catch { /* already deleted */ }
+    await interaction.editReply({
+      content: '✅ **Provider IA configuré !**\n\nMaintenant, la clé Google AI (optionnel — pour la génération d\'images et vidéos).',
+      components: [row(
+        btn('onboard:key:google', 'Entrer clé Google AI', ButtonStyle.Primary, '🔑'),
+        btn('onboard:skip:google', 'Plus tard', ButtonStyle.Secondary, '⏭️'),
+      )],
+    });
+    saveWizardSession(globalDb, session);
   }
 }
 
 // ─── Modal builders ───
-
-function buildAnthropicKeyModal(): ModalBuilder {
-  return new ModalBuilder()
-    .setCustomId('wizard:modal:anthropic')
-    .setTitle('Clé API Anthropic')
-    .addComponents(
-      new ActionRowBuilder<TextInputBuilder>().addComponents(
-        new TextInputBuilder()
-          .setCustomId('api_key')
-          .setLabel('Clé API Anthropic (sk-ant-...)')
-          .setStyle(TextInputStyle.Short)
-          .setPlaceholder('sk-ant-api03-...')
-          .setRequired(true),
-      ),
-    );
-}
 
 function buildGoogleKeyModal(): ModalBuilder {
   return new ModalBuilder()
@@ -642,6 +852,173 @@ async function handleModalSubmit(
     }
 
     await advanceToPostiz(interaction, globalDb);
+    return;
+  }
+
+  // LLM API key modal
+  if (customId === 'wizard:modal:llm:apikey') {
+    const apiKey = interaction.fields.getTextInputValue('llm_api_key');
+    let baseUrl: string | undefined;
+    try { baseUrl = interaction.fields.getTextInputValue('llm_base_url'); } catch { /* field not present */ }
+
+    await interaction.deferReply({ ephemeral: true });
+
+    const session = findSessionForUser(globalDb, interaction);
+    if (session === undefined) return;
+
+    const llmConfig = getLlmSessionConfig(session);
+    const providerId = llmConfig.provider ?? 'anthropic';
+    const modelId = llmConfig.model ?? '';
+    const provider = getLlmProvider(providerId);
+    const resolvedBaseUrl = baseUrl ?? provider?.baseUrl;
+
+    const valid = await validateLlmKey(providerId, apiKey, modelId, resolvedBaseUrl);
+
+    if (!valid) {
+      const payload = buildValidationResult(false, provider?.name ?? providerId, modelId);
+      const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+      trackDmMessageId(session, sentMsg.id);
+      saveWizardSession(globalDb, session);
+      await interaction.editReply({ content: '❌ Clé invalide.' });
+      return;
+    }
+
+    // Store in session
+    setLlmApiKey(session, apiKey);
+    if (resolvedBaseUrl !== undefined) {
+      setLlmBaseUrl(session, resolvedBaseUrl);
+    }
+
+    // Make key available for wizard API calls
+    // Currently all LLM calls go through anthropic.ts service which reads ANTHROPIC_API_KEY
+    process.env['ANTHROPIC_API_KEY'] = apiKey;
+    (session.data as Record<string, unknown>)['_anthropicKey'] = apiKey;
+
+    saveWizardSession(globalDb, session);
+
+    const payload = buildValidationResult(true, provider?.name ?? providerId, modelId);
+    const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+    trackDmMessageId(session, sentMsg.id);
+    saveWizardSession(globalDb, session);
+    await interaction.editReply({ content: '✅ Clé validée.' });
+    return;
+  }
+
+  // LLM custom model ID modal
+  if (customId === 'wizard:modal:llm:custom_model') {
+    const modelId = interaction.fields.getTextInputValue('llm_model_id');
+    let baseUrl: string | undefined;
+    try { baseUrl = interaction.fields.getTextInputValue('llm_base_url'); } catch { /* field not present */ }
+
+    const session = findSessionForUser(globalDb, interaction);
+    if (session === undefined) return;
+
+    setLlmModel(session, modelId);
+    session.data.llmModel = modelId;
+    if (baseUrl !== undefined && baseUrl.length > 0) {
+      setLlmBaseUrl(session, baseUrl);
+    }
+    saveWizardSession(globalDb, session);
+
+    // Can't show modal from a modal submit — send a message with a button instead
+    const payload = v2([buildContainer(getColor('primary'), (c) => {
+      c.addTextDisplayComponents(txt([
+        `## ✅ Modèle configuré : \`${modelId}\``,
+        '',
+        'Maintenant, entre ta clé API.',
+      ].join('\n')));
+      c.addSeparatorComponents(sep());
+      c.addActionRowComponents(row(
+        btn('wizard:llm:retry', 'Entrer la clé API', ButtonStyle.Primary, '🔑'),
+        btn('wizard:llm:back', 'Changer de provider', ButtonStyle.Secondary, '⬅️'),
+      ));
+    })]);
+    const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
+    trackDmMessageId(session, sentMsg.id);
+    saveWizardSession(globalDb, session);
+    if (!interaction.replied && !interaction.deferred) {
+      try { await interaction.deferUpdate(); } catch { /* expired */ }
+    }
+    return;
+  }
+
+  // Project describe modal
+  if (customId === 'wizard:modal:describe') {
+    const session = findSessionForUser(globalDb, interaction);
+    if (session === undefined) return;
+
+    const fields = {
+      projectName: interaction.fields.getTextInputValue('project_name'),
+      projectUrl: interaction.fields.getTextInputValue('project_url'),
+      projectNiche: interaction.fields.getTextInputValue('project_niche'),
+      contentTypes: interaction.fields.getTextInputValue('project_content_types'),
+      platforms: interaction.fields.getTextInputValue('project_platforms'),
+    };
+
+    try { await interaction.deferReply({ ephemeral: true }); } catch { /* expired */ }
+
+    try {
+      const { processDescribeModal } = await import('./describe.js');
+      const { message } = await processDescribeModal(session, fields);
+      saveWizardSession(globalDb, session);
+      const sentMsg = await interaction.user.send({ components: message.components as never[], flags: message.flags });
+      trackDmMessageId(session, sentMsg.id);
+      saveWizardSession(globalDb, session);
+      try { await interaction.editReply({ content: '✅' }); interaction.deleteReply().catch(() => {}); } catch { /* expired */ }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      getLogger().error({ error: msg }, 'Describe modal processing failed');
+      try { await interaction.editReply({ content: `❌ Erreur : ${msg.slice(0, 200)}` }); } catch { /* expired */ }
+    }
+    return;
+  }
+
+  // Source config modals
+  if (customId === 'wizard:modal:source:rss') {
+    const urls = interaction.fields.getTextInputValue('rss_urls')
+      .split('\n')
+      .map((u) => u.trim())
+      .filter((u) => u.length > 0);
+
+    const session = findSessionForUser(globalDb, interaction);
+    if (session !== undefined) {
+      session.data.rssUrls = urls;
+      saveWizardSession(globalDb, session);
+    }
+
+    await interaction.reply({ content: `✅ ${String(urls.length)} flux RSS configurés.`, ephemeral: true });
+    return;
+  }
+
+  if (customId === 'wizard:modal:source:reddit') {
+    const subs = interaction.fields.getTextInputValue('subreddits')
+      .split('\n')
+      .map((s) => s.trim().replace(/^r\//, ''))
+      .filter((s) => s.length > 0);
+
+    const session = findSessionForUser(globalDb, interaction);
+    if (session !== undefined) {
+      session.data.redditSubreddits = subs;
+      saveWizardSession(globalDb, session);
+    }
+
+    await interaction.reply({ content: `✅ ${String(subs.length)} subreddits configurés.`, ephemeral: true });
+    return;
+  }
+
+  if (customId === 'wizard:modal:source:youtube') {
+    const keywords = interaction.fields.getTextInputValue('youtube_keywords')
+      .split('\n')
+      .map((k) => k.trim())
+      .filter((k) => k.length > 0);
+
+    const session = findSessionForUser(globalDb, interaction);
+    if (session !== undefined) {
+      session.data.youtubeKeywords = keywords;
+      saveWizardSession(globalDb, session);
+    }
+
+    await interaction.reply({ content: `✅ ${String(keywords.length)} mots-clés YouTube configurés.`, ephemeral: true });
     return;
   }
 
@@ -775,12 +1152,27 @@ async function handleWizardNext(
 
   try {
     switch (nextStep) {
+      case 'refine_project': {
+        const { buildRefineQuestions } = await import('./refine-project.js');
+        payload = buildRefineQuestions(session);
+        break;
+      }
+      case 'validate_profile': {
+        const { buildProfileValidation } = await import('./refine-project.js');
+        payload = buildProfileValidation(session);
+        break;
+      }
       case 'review_categories':
-      case 'refine_categories':
         ({ message: payload } = await generateCategories(session));
         break;
       case 'dryrun_searxng':
         payload = await dryRunCategories(session);
+        break;
+      case 'configure_sources':
+        payload = buildSourcesSelection(session);
+        break;
+      case 'mini_dryrun_sources':
+        payload = await miniDryRunSources(session);
         break;
       case 'choose_persona_tone':
         payload = buildToneSelection(session);
@@ -856,7 +1248,7 @@ async function handleWizardRedo(
   const step = session.step;
 
   try {
-    if (step === 'review_categories' || step === 'refine_categories') {
+    if (step === 'review_categories') {
       ({ message: payload } = await generateCategories(session));
     } else if (step === 'dryrun_searxng') {
       payload = await dryRunCategories(session);
@@ -906,12 +1298,132 @@ async function handleWizardBack(
   session: WizardSession,
   globalDb: SqliteDatabase,
 ): Promise<void> {
-  // Go back to categories step
-  goToStep(session, 'review_categories');
-  saveWizardSession(globalDb, session);
+  const { goToPreviousStep } = await import('./state-machine.js');
 
+  const prevStep = goToPreviousStep(session);
+  if (prevStep === null) {
+    if (!interaction.replied && !interaction.deferred) {
+      try { await interaction.deferUpdate(); } catch { /* expired */ }
+    }
+    return;
+  }
+
+  saveWizardSession(globalDb, session);
   try { await interaction.deferReply({ ephemeral: true }); } catch { /* expired */ }
-  const { message: payload } = await generateCategories(session);
+
+  // Build the UI for the previous step — reuse existing data, don't regenerate
+  let payload;
+
+  switch (prevStep) {
+    case 'describe_project': {
+      const { buildDescribePrompt } = await import('./describe.js');
+      payload = buildDescribePrompt(session);
+      break;
+    }
+    case 'refine_project': {
+      const { buildRefineQuestions } = await import('./refine-project.js');
+      payload = buildRefineQuestions(session);
+      break;
+    }
+    case 'validate_profile': {
+      const { buildProfileValidation } = await import('./refine-project.js');
+      payload = buildProfileValidation(session);
+      break;
+    }
+    case 'review_categories': {
+      if (session.data.categories !== undefined && session.data.categories.length > 0) {
+        const { buildCategoriesDisplay } = await import('./categories.js');
+        payload = buildCategoriesDisplay(session);
+      } else {
+        const { message: genPayload } = await generateCategories(session);
+        payload = genPayload;
+      }
+      break;
+    }
+    case 'dryrun_searxng': {
+      payload = await dryRunCategories(session);
+      break;
+    }
+    case 'configure_sources': {
+      payload = buildSourcesSelection(session);
+      break;
+    }
+    case 'mini_dryrun_sources': {
+      payload = await miniDryRunSources(session);
+      break;
+    }
+    case 'choose_persona_tone': {
+      const { buildToneSelection: bts } = await import('./persona.js');
+      payload = bts(session);
+      break;
+    }
+    case 'review_persona_identity':
+    case 'review_persona_tone':
+    case 'review_persona_vocabulary':
+    case 'review_persona_art_direction':
+    case 'review_persona_examples': {
+      // Show existing persona section if available, otherwise regenerate
+      const sectionMap: Record<string, { key: string; section: 'identity' | 'tone' | 'vocabulary' | 'art_direction' | 'examples' }> = {
+        review_persona_identity: { key: 'personaIdentity', section: 'identity' },
+        review_persona_tone: { key: 'personaToneSection', section: 'tone' },
+        review_persona_vocabulary: { key: 'personaVocabulary', section: 'vocabulary' },
+        review_persona_art_direction: { key: 'personaArtDirection', section: 'art_direction' },
+        review_persona_examples: { key: 'personaExamples', section: 'examples' },
+      };
+      const mapping = sectionMap[prevStep];
+      if (mapping !== undefined) {
+        const existing = (session.data as Record<string, unknown>)[mapping.key] as string | undefined;
+        if (existing !== undefined && existing.length > 0) {
+          // Display existing section without regenerating
+          const SECTION_LABELS: Record<string, string> = {
+            identity: '🎭 Identité',
+            tone: '🗣️ Ton & personnalité',
+            vocabulary: '📝 Vocabulaire',
+            art_direction: '🎨 Direction artistique',
+            examples: '✍️ Exemples de voix',
+          };
+          const { getStepLabel: localGetStepLabel } = await import('./state-machine.js');
+          const label = SECTION_LABELS[mapping.section] ?? mapping.section;
+          const preview = existing.length > 1500 ? existing.slice(0, 1500) + '\n\n*(...tronqué)*' : existing;
+          payload = v2([buildContainer(getColor('primary'), (c) => {
+            c.addTextDisplayComponents(txt(`## ${label} — Étape ${localGetStepLabel(session.step)}\n\n${preview}`));
+            c.addSeparatorComponents(sep());
+            c.addActionRowComponents(row(
+              btn('wizard:next', 'Valider', ButtonStyle.Success, '✅'),
+              btn('wizard:redo', 'Régénérer', ButtonStyle.Secondary, '🔄'),
+              btn('wizard:modify', 'Modifier', ButtonStyle.Primary, '✏️'),
+              btn('wizard:back', 'Retour', ButtonStyle.Secondary, '◀️'),
+            ));
+          })]);
+        } else {
+          payload = await generatePersonaSection(session, mapping.section);
+        }
+      }
+      break;
+    }
+    case 'configure_platforms': {
+      payload = buildPlatformSelection(session);
+      break;
+    }
+    case 'configure_schedule': {
+      payload = buildScheduleConfig(session);
+      break;
+    }
+    case 'confirm': {
+      const { buildConfirmation: bc } = await import('./confirm.js');
+      assemblePersona(session);
+      payload = bc(session);
+      break;
+    }
+    default:
+      break;
+  }
+
+  if (payload === undefined) {
+    try { await interaction.editReply({ content: '◀️ Retour' }); interaction.deleteReply().catch(() => {}); } catch { /* expired */ }
+    return;
+  }
+
   try {
     const sentMsg = await interaction.user.send({ components: payload.components as never[], flags: payload.flags });
     trackDmMessageId(session, sentMsg.id);
@@ -1010,8 +1522,6 @@ async function handleWizardConfirm(
           }
         });
         insertAll();
-      } else {
-        seedCategories(instanceDb);
       }
 
       // Save persona from wizard
@@ -1019,6 +1529,69 @@ async function handleWizardConfirm(
         instanceDb.prepare(`
           INSERT INTO persona (id, content, updated_at) VALUES (1, ?, datetime('now'))
         `).run(session.data.personaFull);
+      }
+
+      // Save instance profile (V3)
+      saveProfile(instanceDb, {
+        projectName: session.data.projectName ?? instanceName,
+        projectNiche: session.data.projectNiche ?? '',
+        projectDescription: session.data.projectDescription ?? '',
+        projectLanguage: session.data.projectLanguage ?? 'fr',
+        projectUrl: session.data.projectUrl ?? null,
+        targetPlatforms: session.data.projectPlatforms ?? ['tiktok', 'instagram'],
+        targetFormats: session.data.formats ?? ['reel', 'carousel', 'story', 'post'],
+        contentTypes: session.data.contentTypes ?? [],
+        includeDomains: session.data.includeDomains ?? [],
+        excludeDomains: session.data.excludeDomains ?? [],
+        negativeKeywords: session.data.negativeKeywords ?? [],
+        pillars: ['trend', 'tuto', 'community', 'product'],
+        onboardingContext: session.data.onboardingContext ?? '',
+      });
+
+      // Save sources configuration (V3)
+      const enabledSources = session.data.enabledSources ?? [];
+      for (const sourceType of enabledSources) {
+        let config: Record<string, unknown> = {};
+        if (sourceType === 'rss' && session.data.rssUrls !== undefined) {
+          config = { urls: session.data.rssUrls };
+        } else if (sourceType === 'reddit' && session.data.redditSubreddits !== undefined) {
+          config = { subreddits: session.data.redditSubreddits };
+        } else if (sourceType === 'youtube_transcript' && session.data.youtubeKeywords !== undefined) {
+          config = { keywords: session.data.youtubeKeywords, maxResults: 10 };
+        } else if (sourceType === 'web_search') {
+          config = {};
+        }
+        upsertSource(instanceDb, { type: sourceType as 'searxng' | 'rss' | 'youtube_transcript' | 'web_search', enabled: true, config });
+      }
+      // Always ensure SearXNG is enabled
+      upsertSource(instanceDb, { type: 'searxng', enabled: true, config: {} });
+
+      // Save schedule config (V3)
+      saveScheduleConfig(instanceDb, {
+        mode: session.data.scheduleMode ?? 'daily',
+        veilleDay: session.data.veilleDay ?? null,
+        veilleHour: session.data.veilleHour ?? 7,
+        publicationDays: session.data.publicationDays ?? [1, 2, 3, 4, 5],
+        suggestionsPerCycle: session.data.suggestionsPerCycle ?? 3,
+      });
+
+      // Save cron overrides (V3)
+      if (session.data.veilleCron !== undefined) {
+        upsertConfigOverride(instanceDb, 'veilleCron', session.data.veilleCron);
+      }
+      if (session.data.suggestionsCron !== undefined) {
+        upsertConfigOverride(instanceDb, 'suggestionsCron', session.data.suggestionsCron);
+      }
+      if (session.data.rapportCron !== undefined) {
+        upsertConfigOverride(instanceDb, 'rapportCron', session.data.rapportCron);
+      }
+
+      // Save LLM provider config (V3)
+      if (session.data.llmProvider !== undefined) {
+        upsertConfigOverride(instanceDb, 'llm_provider', session.data.llmProvider);
+      }
+      if (session.data.llmModel !== undefined) {
+        upsertConfigOverride(instanceDb, 'llm_model', session.data.llmModel);
       }
     }
 
@@ -1080,6 +1653,23 @@ async function handleWizardConfirm(
     } catch { /* expired */ }
 
     logger.info({ instanceId, guildId: guild.id, name: instanceName }, 'Instance created successfully');
+
+    // Fire-and-forget: generate calibrated scoring examples in background
+    if (session.data.projectNiche !== undefined && session.data.projectNiche.length > 0) {
+      const personaText = session.data.personaFull ?? '';
+      Promise.all([
+        import('../../veille/calibrated-examples.js'),
+        import('../../core/instance-profile.js'),
+      ]).then(([{ generateCalibratedExamples: genExamples }, { getProfile: gp }]) => {
+        const profile = gp(instanceDb);
+        if (profile !== undefined) {
+          logger.info({ instanceId }, 'Starting calibrated examples generation (background)');
+          genExamples(instanceDb, profile, personaText)
+            .then((examples) => { logger.info({ instanceId, count: examples.length }, 'Calibrated examples generated'); })
+            .catch((err) => { logger.error({ instanceId, error: err instanceof Error ? err.message : String(err) }, 'Calibrated examples generation failed'); });
+        }
+      }).catch((err) => { logger.error({ instanceId, error: err instanceof Error ? err.message : String(err) }, 'Failed to load calibrated examples module'); });
+    }
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     logger.error({ error: msg }, 'Instance creation failed');
@@ -1120,17 +1710,3 @@ function findSessionForUser(globalDb: SqliteDatabase, interaction: Interaction):
   return session;
 }
 
-function buildResumePrompt(session: WizardSession): ReturnType<typeof v2> {
-  return v2([buildContainer(getColor('info'), (c) => {
-    c.addTextDisplayComponents(txt([
-      '## 📋 Onboarding en cours',
-      '',
-      `Tu as un onboarding en cours (étape **${session.step}**).`,
-    ].join('\n')));
-    c.addSeparatorComponents(sep());
-    c.addActionRowComponents(row(
-      btn('wizard:next', 'Reprendre', ButtonStyle.Success, '▶️'),
-      btn('wizard:cancel', 'Recommencer', ButtonStyle.Danger, '✖️'),
-    ));
-  })]);
-}

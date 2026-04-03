@@ -106,6 +106,9 @@ export function buildToneSelection(session: WizardSession): V2MessagePayload {
       btn('wizard:tone:custom', 'Custom', ButtonStyle.Primary, '✏️'),
       btn('wizard:tone:neutral', 'Neutre/officiel', ButtonStyle.Secondary, '🏢'),
     ));
+    c.addActionRowComponents(row(
+      btn('wizard:back', 'Retour', ButtonStyle.Secondary, '◀️'),
+    ));
   })]);
 }
 
@@ -161,13 +164,35 @@ export function setTone(session: WizardSession, toneKey: string): void {
 }
 
 /**
+ * Collects previously generated persona sections to inject as context.
+ */
+function getPreviousSectionsContext(session: WizardSession): string {
+  const sections: Array<{ label: string; content: string | undefined }> = [
+    { label: 'Identité', content: session.data.personaIdentity },
+    { label: 'Ton & personnalité', content: session.data.personaToneSection },
+    { label: 'Vocabulaire', content: session.data.personaVocabulary },
+    { label: 'Direction artistique', content: session.data.personaArtDirection },
+    { label: 'Exemples de voix', content: session.data.personaExamples },
+  ];
+
+  const existing = sections
+    .filter((s): s is { label: string; content: string } => s.content !== undefined && s.content.length > 0)
+    .map((s) => `## ${s.label} (déjà validé)\n${s.content.slice(0, 500)}`)
+    .join('\n\n');
+
+  if (existing.length === 0) return '';
+
+  return `\n\nSections du persona déjà générées et validées (reste cohérent avec elles) :\n\n${existing}`;
+}
+
+/**
  * Generate one section of the persona.
  */
 export async function generatePersonaSection(
   session: WizardSession,
   section: PersonaSection,
 ): Promise<V2MessagePayload> {
-  const systemPrompt = buildSystemPrompt(session);
+  const systemPrompt = buildSystemPrompt(session) + getPreviousSectionsContext(session);
   const sectionPrompt = SECTION_PROMPTS[section];
 
   addToHistory(session, 'user', `Génère la section : ${SECTION_LABELS[section]}`);
@@ -197,13 +222,74 @@ export async function generatePersonaSection(
       '',
       preview,
       '',
-      `*Tokens : ${String(session.tokensUsed)} · Itérations : ${String(session.iterationCount)}/20*`,
     ].join('\n')));
     c.addSeparatorComponents(sep());
     c.addActionRowComponents(row(
       btn('wizard:next', 'Valider', ButtonStyle.Success, '✅'),
       btn('wizard:redo', 'Régénérer', ButtonStyle.Secondary, '🔄'),
       btn('wizard:modify', 'Modifier', ButtonStyle.Primary, '✏️'),
+      btn('wizard:back', 'Retour', ButtonStyle.Secondary, '◀️'),
+    ));
+  })]);
+}
+
+/**
+ * Modify an existing persona section based on user instructions.
+ * Unlike generatePersonaSection, this takes the current content and applies changes.
+ */
+export async function modifyPersonaSection(
+  session: WizardSession,
+  section: PersonaSection,
+  instruction: string,
+): Promise<V2MessagePayload> {
+  const systemPrompt = buildSystemPrompt(session) + getPreviousSectionsContext(session);
+
+  // Get current section content
+  const sectionDataKey = `persona${section.charAt(0).toUpperCase()}${section.slice(1).replace(/_(\w)/g, (_, c: string) => c.toUpperCase())}` as keyof typeof session.data;
+  const currentContent = (session.data as Record<string, unknown>)[sectionDataKey] as string | undefined;
+
+  const userMessage = [
+    `Voici la section "${SECTION_LABELS[section]}" actuelle du persona :`,
+    '',
+    currentContent ?? '(pas encore générée)',
+    '',
+    `INSTRUCTION DE MODIFICATION : ${instruction}`,
+    '',
+    'Applique les modifications demandées et retourne la section mise à jour.',
+    'Garde le même format Markdown. Ne regénère pas tout — modifie ce qui est demandé.',
+  ].join('\n');
+
+  addToHistory(session, 'user', `Modification : ${instruction}`);
+
+  const response = await complete(systemPrompt, userMessage, {
+    maxTokens: 1500,
+    temperature: 0.6,
+  });
+
+  recordIteration(session, response.tokensIn, response.tokensOut);
+  addToHistory(session, 'assistant', response.text);
+
+  // Store modified content
+  (session.data as Record<string, unknown>)[sectionDataKey] = response.text;
+
+  const label = SECTION_LABELS[section];
+
+  return v2([buildContainer(getColor('primary'), (c) => {
+    const preview = response.text.length > 1500
+      ? response.text.slice(0, 1500) + '\n\n*(...tronqué pour l\'affichage)*'
+      : response.text;
+
+    c.addTextDisplayComponents(txt([
+      `## ${label} — Étape ${getStepLabel(session.step)}`,
+      '',
+      preview,
+    ].join('\n')));
+    c.addSeparatorComponents(sep());
+    c.addActionRowComponents(row(
+      btn('wizard:next', 'Valider', ButtonStyle.Success, '✅'),
+      btn('wizard:redo', 'Régénérer', ButtonStyle.Secondary, '🔄'),
+      btn('wizard:modify', 'Modifier', ButtonStyle.Primary, '✏️'),
+      btn('wizard:back', 'Retour', ButtonStyle.Secondary, '◀️'),
     ));
   })]);
 }

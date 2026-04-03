@@ -4,7 +4,6 @@ import {
   ButtonStyle,
 } from '../../discord/component-builder-v2.js';
 import { type WizardSession, getStepLabel } from './state-machine.js';
-import { DEFAULT_INSTANCE_CONFIG } from '../../core/config.js';
 import { PLATFORM_CONFIG } from '../postiz-setup.js';
 
 /**
@@ -57,6 +56,7 @@ export function buildPlatformSelection(session: WizardSession): V2MessagePayload
     }
     c.addActionRowComponents(row(
       btn('wizard:next', 'Valider', ButtonStyle.Success, '✅'),
+      btn('wizard:back', 'Retour', ButtonStyle.Secondary, '◀️'),
     ));
   })]);
 }
@@ -65,28 +65,91 @@ export function buildPlatformSelection(session: WizardSession): V2MessagePayload
  * Build the schedule configuration prompt.
  */
 export function buildScheduleConfig(session: WizardSession): V2MessagePayload {
-  const veille = session.data.veilleCron ?? DEFAULT_INSTANCE_CONFIG.scheduler.veilleCron;
-  const suggestions = session.data.suggestionsCron ?? DEFAULT_INSTANCE_CONFIG.scheduler.suggestionsCron;
-  const rapport = session.data.rapportCron ?? DEFAULT_INSTANCE_CONFIG.scheduler.rapportCron;
+  const mode = session.data.scheduleMode ?? 'daily';
+  const veilleDay = session.data.veilleDay ?? 0;
+  const veilleHour = session.data.veilleHour ?? 7;
+  const pubDays = new Set(session.data.publicationDays ?? [1, 2, 3, 4, 5]);
+  const suggestionsPerCycle = session.data.suggestionsPerCycle ?? (mode === 'weekly' ? 21 : 3);
+
+  const dayNames = ['Dim', 'Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam'];
+  const fullDayNames = ['Dimanche', 'Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi'];
+
+  const previewLines: string[] = [];
+  if (mode === 'weekly') {
+    const rapportDay = (veilleDay + 6) % 7;
+    previewLines.push(`📊 ${fullDayNames[rapportDay] ?? ''} 20h — Rapport hebdo`);
+    previewLines.push(`📰 ${fullDayNames[veilleDay] ?? ''} ${String(veilleHour)}h — Veille + ${String(suggestionsPerCycle)} suggestions`);
+    const pubDayNames = [...pubDays].sort().map((d) => fullDayNames[d] ?? '?').join(', ');
+    previewLines.push(`📱 ${pubDayNames} — Publications`);
+  } else {
+    previewLines.push(`📰 Tous les jours à ${String(veilleHour)}h — Veille`);
+    previewLines.push(`💡 Tous les jours à ${String(veilleHour + 1)}h — ${String(suggestionsPerCycle)} suggestions`);
+    previewLines.push('📊 Dimanche 20h — Rapport hebdo');
+  }
 
   return v2([buildContainer(getColor('primary'), (c) => {
     c.addTextDisplayComponents(txt([
-      `## ⏰ Scheduler — Étape ${getStepLabel(session.step)}`,
+      `## ⏰ Planification — Étape ${getStepLabel(session.step)}`,
       '',
-      'Voici les horaires par défaut :',
-      '',
-      `📰 **Veille** : tous les jours à 7h (\`${veille}\`)`,
-      `💡 **Suggestions** : tous les jours à 8h (\`${suggestions}\`)`,
-      `📊 **Rapport** : dimanche à 21h (\`${rapport}\`)`,
-      '',
-      'Tu peux garder ces defaults ou les modifier via le dashboard plus tard.',
+      'Choisis ton mode de fonctionnement :',
     ].join('\n')));
     c.addSeparatorComponents(sep());
     c.addActionRowComponents(row(
-      btn('wizard:next', 'Garder les defaults', ButtonStyle.Success, '✅'),
-      btn('wizard:schedule:edit', 'Modifier', ButtonStyle.Primary, '✏️'),
+      btn('wizard:schedule:mode:weekly', 'Hebdomadaire', mode === 'weekly' ? ButtonStyle.Success : ButtonStyle.Secondary, '📅'),
+      btn('wizard:schedule:mode:daily', 'Quotidien', mode === 'daily' ? ButtonStyle.Success : ButtonStyle.Secondary, '🔄'),
+    ));
+
+    if (mode === 'weekly') {
+      c.addSeparatorComponents(sep());
+      c.addTextDisplayComponents(txt('**Jour de veille :**'));
+      const dayBtns = dayNames.map((name, i) =>
+        btn(`wizard:schedule:day:${String(i)}`, name, i === veilleDay ? ButtonStyle.Success : ButtonStyle.Secondary),
+      );
+      c.addActionRowComponents(row(...dayBtns.slice(0, 5)));
+      c.addActionRowComponents(row(...dayBtns.slice(5)));
+
+      c.addSeparatorComponents(sep());
+      c.addTextDisplayComponents(txt('**Jours de publication :**'));
+      const pubBtns = dayNames.map((name, i) =>
+        btn(`wizard:schedule:pub:${String(i)}`, name, pubDays.has(i) ? ButtonStyle.Success : ButtonStyle.Secondary),
+      );
+      c.addActionRowComponents(row(...pubBtns.slice(0, 5)));
+      c.addActionRowComponents(row(...pubBtns.slice(5)));
+    }
+
+    c.addSeparatorComponents(sep());
+    c.addTextDisplayComponents(txt(['**📋 Aperçu :**', ...previewLines].join('\n')));
+    c.addSeparatorComponents(sep());
+    c.addActionRowComponents(row(
+      btn('wizard:next', 'Valider', ButtonStyle.Success, '✅'),
+      btn('wizard:back', 'Retour', ButtonStyle.Secondary, '◀️'),
     ));
   })]);
+}
+
+export function setScheduleMode(session: WizardSession, mode: 'daily' | 'weekly'): void {
+  session.data.scheduleMode = mode;
+  if (mode === 'weekly') {
+    session.data.suggestionsPerCycle = session.data.suggestionsPerCycle ?? 21;
+    session.data.veilleDay = session.data.veilleDay ?? 0;
+    session.data.publicationDays = session.data.publicationDays ?? [1, 2, 3, 4, 5];
+  } else {
+    session.data.suggestionsPerCycle = session.data.suggestionsPerCycle ?? 3;
+  }
+}
+
+export function setVeilleDay(session: WizardSession, day: number): void {
+  session.data.veilleDay = day;
+}
+
+export function togglePublicationDay(session: WizardSession, day: number): void {
+  const current = new Set(session.data.publicationDays ?? [1, 2, 3, 4, 5]);
+  if (current.has(day)) {
+    current.delete(day);
+  } else {
+    current.add(day);
+  }
+  session.data.publicationDays = [...current].sort();
 }
 
 export function togglePlatform(session: WizardSession, platform: string): void {

@@ -10,17 +10,22 @@ export function createLogger(): pino.Logger {
 
   const config = getConfig();
 
-  const transport =
-    config.NODE_ENV === 'development'
-      ? pino.transport({
-          target: 'pino-pretty',
-          options: {
-            colorize: true,
-            translateTime: 'HH:MM:ss',
-            ignore: 'pid,hostname',
-          },
-        })
-      : undefined;
+  const isDev = config.NODE_ENV === 'development';
+
+  const transport = isDev
+    ? pino.transport({
+        target: 'pino-pretty',
+        options: {
+          colorize: true,
+          translateTime: 'HH:MM:ss',
+          ignore: 'pid,hostname,service',
+          messageFormat: '{msg}',
+          customColors: 'fatal:bgRed,error:red,warn:yellow,info:green,debug:gray,trace:gray',
+          customLevels: '',
+          minimumLevel: config.LOG_LEVEL,
+        },
+      })
+    : undefined;
 
   _logger = pino(
     {

@@ -14,9 +14,37 @@ export function buildConfirmation(session: WizardSession): V2MessagePayload {
   const platforms = d.platforms ?? d.projectPlatforms ?? [];
 
   const catList = categories.map((c) => `  • ${c.label}`).join('\n');
-  const personaPreview = d.personaFull !== undefined
-    ? d.personaFull.slice(0, 300) + (d.personaFull.length > 300 ? '...' : '')
-    : '(non généré)';
+
+  // Persona preview — handle both full persona and neutral mode
+  let personaPreview: string;
+  if (d.personaFull !== undefined && d.personaFull.length > 0) {
+    // Extract first meaningful line (skip markdown headers)
+    const lines = d.personaFull.split('\n').filter((l) => l.trim().length > 0 && !l.startsWith('#'));
+    const firstLines = lines.slice(0, 3).join(' ').slice(0, 200);
+    personaPreview = firstLines.length > 0 ? firstLines + '...' : d.personaTone ?? 'Configuré';
+  } else if (d.personaTone !== undefined) {
+    personaPreview = d.personaTone;
+  } else {
+    personaPreview = '(non généré)';
+  }
+
+  // Schedule display
+  const scheduleMode = d.scheduleMode ?? 'daily';
+  const dayNames = ['Dimanche', 'Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi'];
+  let scheduleDisplay: string;
+  if (scheduleMode === 'weekly' && d.veilleDay !== undefined) {
+    const veilleName = dayNames[d.veilleDay] ?? '?';
+    const hour = String(d.veilleHour ?? 7);
+    const count = String(d.suggestionsPerCycle ?? 21);
+    scheduleDisplay = `Hebdomadaire — ${veilleName} ${hour}h (${count} suggestions/cycle)`;
+  } else {
+    const hour = String(d.veilleHour ?? 7);
+    scheduleDisplay = `Quotidien — veille ${hour}h · suggestions ${String((d.veilleHour ?? 7) + 1)}h · rapport dim 20h`;
+  }
+
+  // Sources display
+  const enabledSources = d.enabledSources ?? ['searxng'];
+  const sourcesDisplay = enabledSources.join(', ');
 
   return v2([buildContainer(getColor('success'), (c) => {
     c.addTextDisplayComponents(txt([
@@ -30,12 +58,13 @@ export function buildConfirmation(session: WizardSession): V2MessagePayload {
       `**📰 Catégories de veille** (${String(categories.length)}) :`,
       catList || '  (aucune)',
       '',
-      `**🎭 Persona** :`,
-      `> ${personaPreview}`,
+      `**📡 Sources** : ${sourcesDisplay}`,
       '',
-      `**⏰ Scheduler** : veille ${d.veilleCron ?? '7h'} · suggestions ${d.suggestionsCron ?? '8h'} · rapport ${d.rapportCron ?? 'dim 21h'}`,
+      `**🎭 Persona** : ${personaPreview}`,
       '',
-      `*Tokens utilisés : ${String(session.tokensUsed)} · Itérations : ${String(session.iterationCount)}/20*`,
+      `**⏰ Scheduler** : ${scheduleDisplay}`,
+      '',
+      `**🤖 Provider IA** : ${d.llmProvider ?? 'anthropic'} — ${d.llmModel ?? 'claude-sonnet-4-6'}`,
       '',
       '**Confirmer va créer :**',
       '• 1 catégorie Discord privée',

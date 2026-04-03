@@ -6,9 +6,12 @@ import type { InstanceVeilleCategory } from '../../core/config.js';
 
 export type WizardStep =
   | 'describe_project'
+  | 'refine_project'
+  | 'validate_profile'
   | 'review_categories'
-  | 'refine_categories'
   | 'dryrun_searxng'
+  | 'configure_sources'
+  | 'mini_dryrun_sources'
   | 'choose_persona_tone'
   | 'review_persona_identity'
   | 'review_persona_tone'
@@ -21,9 +24,12 @@ export type WizardStep =
 
 export const WIZARD_STEPS_ORDER: readonly WizardStep[] = [
   'describe_project',
+  'refine_project',
+  'validate_profile',
   'review_categories',
-  'refine_categories',
   'dryrun_searxng',
+  'configure_sources',
+  'mini_dryrun_sources',
   'choose_persona_tone',
   'review_persona_identity',
   'review_persona_tone',
@@ -65,11 +71,37 @@ export interface WizardData {
   personaExamples?: string;
   personaFull?: string;
 
+  // From choose_llm_provider
+  llmProvider?: string;
+  llmModel?: string;
+
+  // From configure_sources
+  enabledSources?: string[];
+  rssUrls?: string[];
+  redditSubreddits?: string[];
+  youtubeKeywords?: string[];
+  webSearchEnabled?: boolean;
+
+  // From describe_project (V3 enriched)
+  projectUrl?: string;
+  contentTypes?: string[];
+
+  // From refine_project (V3 — LLM follow-up questions)
+  includeDomains?: string[];
+  excludeDomains?: string[];
+  negativeKeywords?: string[];
+  onboardingContext?: string;
+
   // From configure_platforms
   platforms?: string[];
   formats?: string[];
 
   // From configure_schedule
+  scheduleMode?: 'daily' | 'weekly';
+  veilleDay?: number;
+  veilleHour?: number;
+  publicationDays?: number[];
+  suggestionsPerCycle?: number;
   veilleCron?: string;
   suggestionsCron?: string;
   rapportCron?: string;
@@ -217,6 +249,17 @@ export function advanceStep(session: WizardSession): WizardStep | null {
 
 export function goToStep(session: WizardSession, step: WizardStep): void {
   session.step = step;
+}
+
+export function goToPreviousStep(session: WizardSession): WizardStep | null {
+  const currentIndex = getStepIndex(session.step);
+  if (currentIndex <= 0) return null;
+
+  const prevStep = WIZARD_STEPS_ORDER[currentIndex - 1];
+  if (prevStep === undefined) return null;
+
+  session.step = prevStep;
+  return prevStep;
 }
 
 export function canIterate(session: WizardSession): boolean {

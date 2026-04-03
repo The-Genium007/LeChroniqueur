@@ -70,6 +70,34 @@ export function search(
   return results;
 }
 
+export interface EnrichedSearchResult extends SearchResult {
+  readonly status?: string | undefined;
+  readonly score?: number | undefined;
+  readonly url?: string | undefined;
+}
+
+export function enrichResults(db: SqliteDatabase, results: readonly SearchResult[]): readonly EnrichedSearchResult[] {
+  return results.map((r) => {
+    if (r.sourceTable === 'veille_articles') {
+      const row = db.prepare('SELECT status, score, url FROM veille_articles WHERE id = ?').get(r.sourceId) as { status: string; score: number; url: string } | undefined;
+      if (row !== undefined) {
+        return { ...r, status: row.status, score: row.score, url: row.url };
+      }
+    } else if (r.sourceTable === 'suggestions') {
+      const row = db.prepare('SELECT status FROM suggestions WHERE id = ?').get(r.sourceId) as { status: string } | undefined;
+      if (row !== undefined) {
+        return { ...r, status: row.status };
+      }
+    } else if (r.sourceTable === 'publications') {
+      const row = db.prepare('SELECT status FROM publications WHERE id = ?').get(r.sourceId) as { status: string } | undefined;
+      if (row !== undefined) {
+        return { ...r, status: row.status };
+      }
+    }
+    return r;
+  });
+}
+
 export function searchCount(db: SqliteDatabase, query: string): number {
   const sanitized = query
     .replace(/['"]/g, '')

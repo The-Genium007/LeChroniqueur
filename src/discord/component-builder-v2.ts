@@ -27,12 +27,12 @@ export interface V2MessagePayload {
 // ─── Theme ───
 
 const DEFAULT_THEME = {
-  primary: 0xc8a87c,
+  primary: 0x5865f2,
   success: 0x57f287,
   warning: 0xfee75c,
   error: 0xed4245,
   info: 0x5865f2,
-  veille: 0xc8a87c,
+  veille: 0x5865f2,
   suggestion: 0x5865f2,
   production: 0xeb459e,
   publication: 0x57f287,
@@ -102,6 +102,66 @@ export function infoMessage(message: string, theme?: Partial<typeof DEFAULT_THEM
   return v2([buildContainer(getColor('info', theme), (c) => {
     c.addTextDisplayComponents(txt(message));
   })]);
+}
+
+// ─── API Error Messages ───
+
+export function apiErrorMessage(error: Error, theme?: Partial<typeof DEFAULT_THEME>): V2MessagePayload {
+  const name = error.name;
+  const provider = (error as { provider?: string }).provider;
+  const label = provider === 'anthropic' ? 'Anthropic (Claude)' : 'Google AI (Imagen/Veo)';
+  const billingUrl = provider === 'anthropic'
+    ? '[console.anthropic.com](https://console.anthropic.com/settings/billing)'
+    : '[console.cloud.google.com](https://console.cloud.google.com/billing)';
+
+  if (name === 'ApiQuotaExhaustedError') {
+    return v2([buildContainer(getColor('error', theme), (c) => {
+      c.addTextDisplayComponents(txt([
+        `## 💸 Quota ${label} épuisé`,
+        '',
+        'Les crédits API sont insuffisants pour cette opération.',
+        '',
+        `**Action :** Vérifie ton solde sur ${billingUrl}`,
+      ].join('\n')));
+    })]);
+  }
+
+  if (name === 'ApiAuthError') {
+    return v2([buildContainer(getColor('error', theme), (c) => {
+      c.addTextDisplayComponents(txt([
+        `## 🔑 Clé ${label} invalide`,
+        '',
+        'La clé API a été refusée par le serveur.',
+        '',
+        '**Action :** Mets à jour ta clé via le dashboard (Config > Clés API).',
+      ].join('\n')));
+    })]);
+  }
+
+  if (name === 'ApiNotConfiguredError') {
+    return v2([buildContainer(getColor('warning', theme), (c) => {
+      c.addTextDisplayComponents(txt([
+        `## ⚠️ ${label} non configuré`,
+        '',
+        'Aucune clé API n\'est enregistrée pour ce service.',
+        '',
+        '**Action :** Configure ta clé via le dashboard (Config > Clés API).',
+      ].join('\n')));
+    })]);
+  }
+
+  if (name === 'ApiOverloadedError') {
+    return v2([buildContainer(getColor('warning', theme), (c) => {
+      c.addTextDisplayComponents(txt([
+        `## ⏳ ${label} surchargé`,
+        '',
+        'Le service est temporairement indisponible. Réessaie dans quelques minutes.',
+      ].join('\n')));
+    })]);
+  }
+
+  // Fallback — generic error
+  return errorMessage(error.message, theme);
 }
 
 // ─── Veille ───
@@ -381,6 +441,102 @@ export interface V2SearchResultData {
   readonly sourceId: number;
   readonly title: string;
   readonly snippet: string;
+  readonly status?: string | undefined;
+  readonly score?: number | undefined;
+  readonly url?: string | undefined;
+}
+
+const TABLE_LABELS: Record<string, string> = {
+  veille_articles: '📰 Veille',
+  suggestions: '💡 Suggestion',
+  publications: '📤 Publication',
+};
+
+const STATUS_LABELS: Record<string, string> = {
+  new: '🆕 Nouveau',
+  proposed: '📋 Proposé',
+  transformed: '🔄 Transformé',
+  archived: '📦 Archivé',
+  pending: '⏳ En attente',
+  go: '✅ Validé',
+  skipped: '⏭️ Skippé',
+  later: '⏰ Reporté',
+  modified: '✏️ Modifié',
+  draft: '📝 Brouillon',
+  scheduled: '📅 Programmé',
+  published: '✅ Publié',
+};
+
+function searchResultCard(
+  result: V2SearchResultData,
+  theme?: Partial<typeof DEFAULT_THEME>,
+): ReturnType<ContainerBuilder['toJSON']> {
+  const tableLabel = TABLE_LABELS[result.sourceTable] ?? result.sourceTable;
+  const statusLabel = result.status !== undefined ? (STATUS_LABELS[result.status] ?? result.status) : undefined;
+
+  const colorKey: ThemeColor = result.sourceTable === 'veille_articles' ? 'veille'
+    : result.sourceTable === 'suggestions' ? 'suggestion'
+    : result.sourceTable === 'publications' ? 'publication'
+    : 'info';
+
+  return buildContainer(getColor(colorKey, theme), (c) => {
+    // Title with link if URL available
+    const titleText = result.url !== undefined
+      ? `### ${tableLabel} — [${result.title}](${result.url})`
+      : `### ${tableLabel} — ${result.title}`;
+    c.addTextDisplayComponents(txt(titleText));
+
+    // Meta line: status + score
+    const meta: string[] = [];
+    if (statusLabel !== undefined) meta.push(statusLabel);
+    if (result.score !== undefined) meta.push(`⭐ ${String(result.score)}/10`);
+    if (meta.length > 0) {
+      c.addTextDisplayComponents(txt(meta.join('  ·  ')));
+    }
+
+    // Snippet
+    if (result.snippet.length > 0) {
+      c.addTextDisplayComponents(txt(`> ${result.snippet.slice(0, 150)}`));
+    }
+
+    c.addSeparatorComponents(sep());
+
+    // Contextual buttons based on sourceTable + status
+    const id = result.sourceId;
+    if (result.sourceTable === 'veille_articles') {
+      const buttons: ButtonBuilder[] = [];
+      if (result.status !== 'proposed' && result.status !== 'transformed') {
+        buttons.push(btn(`search:suggest:${String(id)}`, 'Suggérer', ButtonStyle.Success, '💡'));
+      }
+      buttons.push(btn(`transform:veille_articles:${String(id)}`, 'Deep dive', ButtonStyle.Primary, '🎯'));
+      if (result.status === 'archived') {
+        buttons.push(btn(`search:reactivate:veille_articles:${String(id)}`, 'Réactiver', ButtonStyle.Secondary, '♻️'));
+      } else if (result.status !== 'archived') {
+        buttons.push(btn(`archive:veille_articles:${String(id)}`, 'Archiver', ButtonStyle.Secondary, '⏭️'));
+      }
+      c.addActionRowComponents(row(...buttons));
+    } else if (result.sourceTable === 'suggestions') {
+      const buttons: ButtonBuilder[] = [];
+      if (result.status === 'pending' || result.status === 'later' || result.status === 'modified') {
+        buttons.push(btn(`go:suggestions:${String(id)}`, 'Go', ButtonStyle.Success, '✅'));
+        buttons.push(btn(`modify:suggestions:${String(id)}`, 'Modifier', ButtonStyle.Primary, '✏️'));
+        buttons.push(btn(`skip:suggestions:${String(id)}`, 'Skip', ButtonStyle.Secondary, '⏭️'));
+      } else if (result.status === 'skipped') {
+        buttons.push(btn(`search:reactivate:suggestions:${String(id)}`, 'Réactiver', ButtonStyle.Success, '♻️'));
+      }
+      if (buttons.length > 0) {
+        c.addActionRowComponents(row(...buttons));
+      }
+    } else if (result.sourceTable === 'publications') {
+      const buttons: ButtonBuilder[] = [];
+      if (result.status === 'draft') {
+        buttons.push(btn(`search:reactivate:publications:${String(id)}`, 'Reprogrammer', ButtonStyle.Primary, '📅'));
+      }
+      if (buttons.length > 0) {
+        c.addActionRowComponents(row(...buttons));
+      }
+    }
+  });
 }
 
 export function searchResults(
@@ -390,39 +546,25 @@ export function searchResults(
   total: number,
   theme?: Partial<typeof DEFAULT_THEME>,
 ): V2MessagePayload {
-  return v2([buildContainer(getColor('info', theme), (c) => {
+  const containers: ReturnType<ContainerBuilder['toJSON']>[] = [];
+
+  // Header container
+  containers.push(buildContainer(getColor('info', theme), (c) => {
     c.addTextDisplayComponents(txt(`## 🔍 Résultats pour "${query}"\n${String(total)} résultats trouvés`));
 
     if (results.length === 0) {
       c.addTextDisplayComponents(txt('Aucun résultat trouvé.'));
-      return;
     }
+  }));
 
-    const grouped: Record<string, V2SearchResultData[]> = {};
-    for (const r of results) {
-      const existing = grouped[r.sourceTable];
-      if (existing === undefined) {
-        grouped[r.sourceTable] = [r];
-      } else {
-        existing.push(r);
-      }
-    }
+  // Individual result cards (max 8 to stay under Discord's 10-container limit)
+  for (const r of results.slice(0, 8)) {
+    containers.push(searchResultCard(r, theme));
+  }
 
-    const tableLabels: Record<string, string> = {
-      veille_articles: '📰 Veille',
-      suggestions: '💡 Suggestions',
-      publications: '📤 Publications',
-    };
-
-    c.addSeparatorComponents(sep());
-
-    for (const [table, items] of Object.entries(grouped)) {
-      const label = tableLabels[table] ?? table;
-      const lines = items.slice(0, 5).map((r) => `► ${r.title}\n  ${r.snippet.slice(0, 100)}...`);
-      c.addTextDisplayComponents(txt(`### ${label} (${String(items.length)})\n${lines.join('\n')}`));
-    }
-
-    const totalPages = Math.ceil(total / 10);
+  // Navigation container
+  const totalPages = Math.ceil(total / 8);
+  containers.push(buildContainer(getColor('info', theme), (c) => {
     const navButtons: ButtonBuilder[] = [];
 
     if (page > 1) {
@@ -432,7 +574,6 @@ export function searchResults(
       navButtons.push(btn(`search:page:${String(page + 1)}`, 'Suivant', ButtonStyle.Secondary, '▶️'));
     }
 
-    c.addSeparatorComponents(sep());
     c.addTextDisplayComponents(txt(`Page ${String(page)}/${String(totalPages)}`));
 
     if (navButtons.length > 0) {
@@ -443,7 +584,9 @@ export function searchResults(
       btn('search:open', 'Nouvelle recherche', ButtonStyle.Primary, '🔍'),
       btn('search:clear', 'Effacer résultats', ButtonStyle.Secondary, '🧹'),
     ));
-  })]);
+  }));
+
+  return v2(containers);
 }
 
 // ─── Preference Profile ───
@@ -624,6 +767,151 @@ export function publicationConfirmation(data: V2PublicationConfirmationData, the
     c.addSeparatorComponents(sep());
     c.addTextDisplayComponents(txt(`**📝 Aperçu**\n${data.content.slice(0, 200)}`));
   })]);
+}
+
+// ─── Derivation: Master content card ───
+
+export interface V2MasterContentData {
+  readonly treeId: number;
+  readonly suggestionId: number;
+  readonly masterText: string;
+  readonly imageUrl?: string;
+}
+
+export function masterContent(data: V2MasterContentData): V2MessagePayload {
+  return v2([buildContainer(getColor('production'), (c) => {
+    c.addTextDisplayComponents(txt('## 🎯 Contenu Master'));
+    c.addSeparatorComponents(sep());
+    c.addTextDisplayComponents(txt(data.masterText.slice(0, 3500)));
+    if (data.imageUrl !== undefined) {
+      c.addSeparatorComponents(sep());
+      c.addTextDisplayComponents(txt(`🖼️ Image master : ${data.imageUrl}`));
+    }
+    c.addSeparatorComponents(sep());
+    c.addActionRowComponents(row(
+      btn(`master:validate:${String(data.treeId)}`, 'Valider master', ButtonStyle.Success, '✅'),
+      btn(`master:modify_text:${String(data.treeId)}`, 'Modifier texte', ButtonStyle.Primary, '✏️'),
+      btn(`master:regen_image:${String(data.treeId)}`, 'Regénérer image', ButtonStyle.Secondary, '🖼️'),
+    ));
+  })]);
+}
+
+// ─── Derivation: Thread content card ───
+
+export interface V2DerivationThreadData {
+  readonly derivationId: number;
+  readonly platform: string;
+  readonly format: string;
+  readonly emoji: string;
+  readonly adaptedText: string;
+  readonly mediaPrompt?: string;
+  readonly status: string;
+}
+
+export function derivationThread(data: V2DerivationThreadData): V2MessagePayload {
+  return v2([buildContainer(getColor('production'), (c) => {
+    c.addTextDisplayComponents(txt(`## ${data.emoji} ${data.platform} — ${data.format}`));
+    c.addSeparatorComponents(sep());
+    c.addTextDisplayComponents(txt(data.adaptedText.slice(0, 3500)));
+    if (data.mediaPrompt !== undefined) {
+      c.addSeparatorComponents(sep());
+      c.addTextDisplayComponents(txt(`🎨 **Prompt média** : ${data.mediaPrompt.slice(0, 500)}`));
+    }
+    c.addSeparatorComponents(sep());
+    c.addActionRowComponents(row(
+      btn(`deriv:validate:${String(data.derivationId)}`, 'Valider', ButtonStyle.Success, '✅'),
+      btn(`deriv:reject:${String(data.derivationId)}`, 'Refuser', ButtonStyle.Danger, '❌'),
+      btn(`deriv:modify:${String(data.derivationId)}`, 'Modifier', ButtonStyle.Primary, '✏️'),
+    ));
+  })]);
+}
+
+// ─── Derivation: Media validation card ───
+
+export interface V2DerivationMediaData {
+  readonly derivationId: number;
+  readonly platform: string;
+  readonly emoji: string;
+  readonly mediaUrl: string;
+  readonly mediaType: string;
+}
+
+export function derivationMedia(data: V2DerivationMediaData): V2MessagePayload {
+  return v2([buildContainer(getColor('production'), (c) => {
+    c.addTextDisplayComponents(txt(`## ${data.emoji} Média — ${data.platform}`));
+    c.addSeparatorComponents(sep());
+    c.addTextDisplayComponents(txt(`📎 **Type** : ${data.mediaType}\n🔗 ${data.mediaUrl}`));
+    c.addSeparatorComponents(sep());
+    c.addActionRowComponents(row(
+      btn(`deriv:validate_media:${String(data.derivationId)}`, 'Valider média', ButtonStyle.Success, '✅'),
+      btn(`deriv:regen_media:${String(data.derivationId)}`, 'Regénérer', ButtonStyle.Secondary, '🔄'),
+    ));
+  })]);
+}
+
+// ─── Derivation: Publication recap card ───
+
+export interface V2DerivationRecapData {
+  readonly treeId: number;
+  readonly masterTitle: string;
+  readonly derivations: readonly {
+    readonly platform: string;
+    readonly emoji: string;
+    readonly format: string;
+    readonly status: string;
+    readonly scheduledAt?: string;
+  }[];
+}
+
+export function derivationRecap(data: V2DerivationRecapData): V2MessagePayload {
+  const statusEmoji = (status: string): string => {
+    switch (status) {
+      case 'ready': return '✅';
+      case 'rejected': return '❌';
+      case 'scheduled': return '📅';
+      case 'published': return '🚀';
+      default: return '⏳';
+    }
+  };
+
+  const lines = data.derivations.map((d) => {
+    const schedule = d.scheduledAt !== undefined ? ` — 📅 ${d.scheduledAt}` : '';
+    return `${statusEmoji(d.status)} ${d.emoji} **${d.platform}** (${d.format})${schedule}`;
+  });
+
+  return v2([buildContainer(getColor('publication'), (c) => {
+    c.addTextDisplayComponents(txt(`## 📤 Publication — ${data.masterTitle.slice(0, 80)}`));
+    c.addSeparatorComponents(sep());
+    c.addTextDisplayComponents(txt(lines.join('\n')));
+    c.addSeparatorComponents(sep());
+    c.addActionRowComponents(row(
+      btn(`pub:schedule_all:${String(data.treeId)}`, 'Programmer tout', ButtonStyle.Success, '✅'),
+      btn(`pub:modify_schedule:${String(data.treeId)}`, 'Modifier horaires', ButtonStyle.Primary, '📅'),
+      btn(`pub:select:${String(data.treeId)}`, 'Sélectionner', ButtonStyle.Secondary, '☑️'),
+    ));
+  })]);
+}
+
+// ─── Analytics report section ───
+
+export interface V2AnalyticsReportData {
+  readonly weeklyStats: string;
+  readonly slotRecommendations: string;
+  readonly treeId?: number;
+}
+
+export function analyticsReport(data: V2AnalyticsReportData): V2MessagePayload {
+  const containers = [
+    buildContainer(getColor('info'), (c) => {
+      c.addTextDisplayComponents(txt('## 📊 Analytics & Créneaux'));
+      c.addSeparatorComponents(sep());
+      c.addTextDisplayComponents(txt(data.weeklyStats));
+      c.addSeparatorComponents(sep());
+      c.addTextDisplayComponents(txt(data.slotRecommendations));
+    }),
+  ];
+
+  return v2(containers);
 }
 
 // ─── Export helpers for dashboard pages ───

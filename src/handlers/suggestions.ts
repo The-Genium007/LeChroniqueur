@@ -44,6 +44,7 @@ async function runSuggestionsPipeline(
   ideesChannel: TextChannel,
   logsChannel: TextChannel,
   alertChannel: TextChannel,
+  instanceId?: string,
 ): Promise<void> {
   const logger = getLogger();
 
@@ -54,7 +55,11 @@ async function runSuggestionsPipeline(
     return;
   }
 
-  const suggestions = await generateSuggestions(db, 3);
+  // Read suggestions count from config
+  const countRow = db.prepare("SELECT value FROM config_overrides WHERE key = 'suggestionsPerCycle'").get() as { value: string } | undefined;
+  const count = countRow !== undefined ? Number(countRow.value) : 3;
+
+  const suggestions = await generateSuggestions(db, count, instanceId);
 
   if (suggestions.length === 0) {
     logger.info('No suggestions generated');
@@ -116,26 +121,12 @@ async function runSuggestionsPipeline(
   logger.info({ count: suggestions.length }, 'Suggestions pipeline complete');
 }
 
-// ─── V2: InstanceContext entry point ───
-
-export async function handleSuggestionsCronV2(ctx: InstanceContext): Promise<void> {
+export async function handleSuggestionsCron(ctx: InstanceContext): Promise<void> {
   await runSuggestionsPipeline(
     ctx.db,
     ctx.channels.idees,
     ctx.channels.logs,
     ctx.channels.logs,
+    ctx.id,
   );
-}
-
-// ─── Legacy entry point ───
-
-interface SuggestionsHandlerDeps {
-  readonly db: SqliteDatabase;
-  readonly ideesChannel: TextChannel;
-  readonly logsChannel: TextChannel;
-  readonly adminChannel: TextChannel;
-}
-
-export async function handleSuggestionsCron(deps: SuggestionsHandlerDeps): Promise<void> {
-  await runSuggestionsPipeline(deps.db, deps.ideesChannel, deps.logsChannel, deps.adminChannel);
 }

@@ -18,23 +18,31 @@ import { checkHealth } from './core/health.js';
 import { checkForUpdate, CURRENT_VERSION } from './core/update-checker.js';
 import { requireInstanceOwner } from './discord/permissions.js';
 import { parseButtonCustomId, autoDeleteReply, autoDeleteEditReply } from './discord/interactions.js';
-import { handleVeilleCronV2 } from './handlers/veille.js';
-import { handleSuggestionsCronV2 } from './handlers/suggestions.js';
-import { handleWeeklyRapportV2 } from './handlers/rapport.js';
-import { handleAdminMessageV2 } from './handlers/conversation.js';
-import { setPendingModification } from './handlers/conversation.js';
+import { handleVeilleCron } from './handlers/veille.js';
+import { handleSuggestionsCron } from './handlers/suggestions.js';
+import { handleWeeklyRapport } from './handlers/rapport.js';
+import { handleAdminMessage, setPendingModification } from './handlers/conversation.js';
 import { upsertRating } from './feedback/ratings.js';
 import { deepDive } from './veille/deep-dive.js';
-import { generateFinalScript } from './content/scripts.js';
+// generateFinalScript replaced by derivation master flow
 import { recordAnthropicUsage } from './budget/tracker.js';
 import {
-  production as buildProductionV2,
   deepDiveResult as buildDeepDiveV2,
   errorMessage as buildErrorV2,
 } from './discord/component-builder-v2.js';
 import { sendSplit, replySplit } from './discord/message-splitter.js';
 import { handleGenerateImages } from './handlers/production.js';
 import { handlePublish } from './handlers/publication.js';
+import {
+  handleCreateMaster,
+  handleMasterValidation,
+  handleDerivationValidation,
+  handleDerivationRejection,
+  processDerivationJob,
+  processMediaJob,
+} from './handlers/derivation.js';
+import { personaLoader } from './core/persona-loader.js';
+import { createQueueProcessor, resetStuckJobs } from './derivation/queue.js';
 import { handleWizardInteraction } from './onboarding/wizard/orchestrator.js';
 import type { InstanceContext } from './registry/instance-context.js';
 
@@ -42,7 +50,7 @@ async function main(): Promise<void> {
   const config = loadConfig();
   const logger = createLogger();
 
-  logger.info({ version: CURRENT_VERSION, env: config.NODE_ENV, dryRun: config.DRY_RUN, mockApis: config.MOCK_APIS }, 'Starting Le Chroniqueur V2');
+  logger.info({ version: CURRENT_VERSION, env: config.NODE_ENV, dryRun: config.DRY_RUN, mockApis: config.MOCK_APIS }, 'Starting bot');
 
   if (isLegacyMode()) {
     logger.info('Legacy mode detected (channel IDs in env). Please use: node dist/index.js');
@@ -51,6 +59,11 @@ async function main(): Promise<void> {
 
   // ─── 1. Global Database ───
   const globalDb = createGlobalDatabase();
+
+  // ─── 1b. LLM Factory ───
+  const { initLlmFactoryFromEnv } = await import('./services/llm-factory.js');
+  initLlmFactoryFromEnv();
+  logger.info('LLM factory initialized');
 
   // ─── 2. Discord Client ───
   const client = createClient();
@@ -80,9 +93,12 @@ async function main(): Promise<void> {
   for (const ctx of registry.getAll()) {
     if (ctx.status !== 'active') continue;
 
-    // Set API key in process.env so the Anthropic service can use it
+    // Set API keys in process.env so services can use them
     if (ctx.secrets.anthropicApiKey.length > 0) {
       process.env['ANTHROPIC_API_KEY'] = ctx.secrets.anthropicApiKey;
+    }
+    if (ctx.secrets.googleAiApiKey !== undefined && ctx.secrets.googleAiApiKey.length > 0) {
+      process.env['GOOGLE_AI_API_KEY'] = ctx.secrets.googleAiApiKey;
     }
 
     try {
@@ -125,18 +141,19 @@ async function main(): Promise<void> {
       // Handle search modal submission
       if (interaction.isModalSubmit() && interaction.customId === 'search:modal:query') {
         const query = interaction.fields.getTextInputValue('query');
-        const { search: ftsSearch, searchCount } = await import('./search/engine.js');
+        const { search: ftsSearch, searchCount, enrichResults } = await import('./search/engine.js');
         const { searchResults: buildSearchResultsV2 } = await import('./discord/component-builder-v2.js');
-        const { trackTempMessage } = await import('./dashboard/search.js');
+        const { trackTempMessage, setLastQuery } = await import('./dashboard/search.js');
 
-        const results = ftsSearch(ctx.db, query, 10, 0);
+        const results = ftsSearch(ctx.db, query, 8, 0);
         const total = searchCount(ctx.db, query);
-        const mapped = results.map((r) => ({ sourceTable: r.sourceTable, sourceId: r.sourceId, title: r.title, snippet: r.snippet }));
-        const payload = buildSearchResultsV2(mapped, query, 1, total);
+        const enriched = enrichResults(ctx.db, results);
+        const payload = buildSearchResultsV2(enriched, query, 1, total);
 
         await interaction.reply({ components: payload.components as never[], flags: payload.flags } as never);
         if (interaction.channelId !== null) {
           trackTempMessage(interaction.channelId, interaction.id);
+          setLastQuery(interaction.channelId, query);
         }
         return;
       }
@@ -249,7 +266,10 @@ async function main(): Promise<void> {
         await autoDeleteReply(interaction, '👎 Noté !');
       } else if (action === 'archive') {
         ctx.db.prepare('UPDATE veille_articles SET status = ? WHERE id = ?').run('archived', targetId);
-        await interaction.update({ components: [] });
+        try { await interaction.message.delete(); } catch { /* already deleted */ }
+        if (!interaction.replied && !interaction.deferred) {
+          try { await interaction.deferUpdate(); } catch { /* expired */ }
+        }
       } else if (action === 'transform') {
         await interaction.deferReply();
         try {
@@ -271,21 +291,26 @@ async function main(): Promise<void> {
 
       // Suggestion buttons
       } else if (action === 'go') {
-        await interaction.deferUpdate();
+        await interaction.deferReply({ ephemeral: true });
         ctx.db.prepare("UPDATE suggestions SET status = ?, decided_at = datetime('now') WHERE id = ?").run('go', targetId);
         upsertRating(ctx.db, 'suggestions', targetId, 1, interaction.user.id);
-        await interaction.editReply({ components: [] });
+        try { await interaction.message.delete(); } catch { /* already deleted */ }
         try {
-          const suggestion = ctx.db.prepare('SELECT content, platform, format FROM suggestions WHERE id = ?')
-            .get(targetId) as { content: string; platform: string; format: string | null } | undefined;
-          if (suggestion !== undefined) {
-            const script = await generateFinalScript(suggestion.content, suggestion.platform, suggestion.format ?? 'reel');
-            const payload = buildProductionV2({ id: targetId, textOverlay: script.textOverlay, fullScript: script.fullScript, hashtags: script.hashtags, platform: script.platform, suggestedTime: script.suggestedTime, notes: script.notes });
-            await sendSplit(ctx.channels.production, payload);
-          }
+          // Create master content (text + image 1:1) and post to #production
+          const persona = personaLoader.loadForInstance(ctx.id, ctx.db);
+          await handleCreateMaster(targetId, {
+            db: ctx.db,
+            productionChannel: ctx.channels.production,
+            publicationChannel: ctx.channels.publication,
+            logsChannel: ctx.channels.logs,
+            persona,
+            configuredPlatforms: ctx.config.content.platforms,
+          });
+          await autoDeleteEditReply(interaction, '✅ Suggestion acceptée — master posté en #production.');
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
-          getLogger().error({ error: msg, suggestionId: targetId }, 'Failed to generate script');
+          getLogger().error({ error: msg, suggestionId: targetId }, 'Failed to create master');
+          await autoDeleteEditReply(interaction, `❌ Erreur : ${msg}`);
         }
       } else if (action === 'modify') {
         const suggestion = ctx.db.prepare('SELECT content FROM suggestions WHERE id = ?')
@@ -299,7 +324,10 @@ async function main(): Promise<void> {
       } else if (action === 'skip') {
         ctx.db.prepare("UPDATE suggestions SET status = ?, decided_at = datetime('now') WHERE id = ?").run('skipped', targetId);
         upsertRating(ctx.db, 'suggestions', targetId, -1, interaction.user.id);
-        await interaction.update({ components: [] });
+        try { await interaction.message.delete(); } catch { /* already deleted */ }
+        if (!interaction.replied && !interaction.deferred) {
+          try { await interaction.deferUpdate(); } catch { /* expired */ }
+        }
       } else if (action === 'later') {
         ctx.db.prepare("UPDATE suggestions SET status = ? WHERE id = ?").run('later', targetId);
         await autoDeleteReply(interaction, '⏰ Remis à plus tard.');
@@ -350,10 +378,84 @@ async function main(): Promise<void> {
         }
       } else if (action === 'select_image') {
         ctx.db.prepare("UPDATE media SET type = ? WHERE id = ?").run('image_selected', targetId);
-        await interaction.update({ components: [] });
+        try { await interaction.message.delete(); } catch { /* already deleted */ }
         await autoDeleteReply(interaction, '🖼️ Variante sélectionnée.');
 
-      // Publication buttons
+      // Master buttons (derivation system)
+      } else if (action === 'master') {
+        const rawId = interaction.customId;
+        const persona = personaLoader.loadForInstance(ctx.id, ctx.db);
+        const derivDeps = {
+          db: ctx.db,
+          productionChannel: ctx.channels.production,
+          publicationChannel: ctx.channels.publication,
+          logsChannel: ctx.channels.logs,
+          persona,
+          configuredPlatforms: ctx.config.content.platforms,
+        };
+
+        if (rawId.startsWith('master:validate:')) {
+          await interaction.deferReply({ ephemeral: true });
+          try {
+            await handleMasterValidation(interaction, targetId, derivDeps);
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            await autoDeleteEditReply(interaction, `❌ Erreur : ${msg}`);
+          }
+        } else if (rawId.startsWith('master:modify_text:')) {
+          setPendingModification(interaction.user.id, targetId, 'master_text');
+          await interaction.reply({ content: '✏️ Écris tes instructions de modification du texte master. (expire dans 5 min)', ephemeral: true });
+        } else if (rawId.startsWith('master:regen_image:')) {
+          await interaction.deferReply({ ephemeral: true });
+          try {
+            await handleGenerateImages(interaction, targetId, {
+              db: ctx.db, productionChannel: ctx.channels.production,
+              logsChannel: ctx.channels.logs, adminChannel: ctx.channels.logs,
+            });
+            await autoDeleteEditReply(interaction, '🖼️ Image master regénérée.');
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            await autoDeleteEditReply(interaction, `❌ Erreur : ${msg}`);
+          }
+        }
+
+      // Derivation buttons
+      } else if (action === 'deriv') {
+        const rawId = interaction.customId;
+        const persona = personaLoader.loadForInstance(ctx.id, ctx.db);
+        const derivDeps = {
+          db: ctx.db,
+          productionChannel: ctx.channels.production,
+          publicationChannel: ctx.channels.publication,
+          logsChannel: ctx.channels.logs,
+          persona,
+          configuredPlatforms: ctx.config.content.platforms,
+        };
+
+        if (rawId.startsWith('deriv:validate:')) {
+          await interaction.deferReply({ ephemeral: true });
+          try {
+            await handleDerivationValidation(interaction, targetId, derivDeps);
+            await autoDeleteEditReply(interaction, '✅ Dérivation validée.');
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            await autoDeleteEditReply(interaction, `❌ Erreur : ${msg}`);
+          }
+        } else if (rawId.startsWith('deriv:reject:')) {
+          await interaction.deferReply({ ephemeral: true });
+          await handleDerivationRejection(interaction, targetId, derivDeps);
+        } else if (rawId.startsWith('deriv:modify:')) {
+          setPendingModification(interaction.user.id, targetId, 'deriv_text');
+          await interaction.reply({ content: '✏️ Écris tes instructions de modification. (expire dans 5 min)', ephemeral: true });
+        } else if (rawId.startsWith('deriv:validate_media:')) {
+          const { updateDerivationStatus } = await import('./derivation/tree.js');
+          updateDerivationStatus(ctx.db, targetId, 'ready');
+          await autoDeleteReply(interaction, '✅ Média validé — dérivation prête.');
+        } else if (rawId.startsWith('deriv:regen_media:')) {
+          await autoDeleteReply(interaction, '🔄 Regénération du média en file d\'attente.');
+        }
+
+      // Publication buttons (includes derivation scheduling)
       } else if (action === 'pub') {
         const rawId = interaction.customId;
         if (rawId.startsWith('pub:copy:')) {
@@ -361,7 +463,10 @@ async function main(): Promise<void> {
           await interaction.reply({ content: suggestion?.content ?? 'Contenu introuvable.', ephemeral: true });
         } else if (rawId.startsWith('pub:done:')) {
           ctx.db.prepare("UPDATE publications SET status = 'published', published_at = datetime('now') WHERE suggestion_id = ?").run(targetId);
-          await interaction.update({ components: [] });
+          try { await interaction.message.delete(); } catch { /* already deleted */ }
+          if (!interaction.replied && !interaction.deferred) {
+            try { await interaction.deferUpdate(); } catch { /* expired */ }
+          }
         } else if (rawId.startsWith('pub:postpone:')) {
           await autoDeleteReply(interaction, '📅 Reporter la publication. Modifie la date dans le dashboard.', 8_000);
         } else {
@@ -391,6 +496,78 @@ async function main(): Promise<void> {
             await clearSearchResults(interaction.channel as import('discord.js').TextChannel, interaction.channelId);
           }
           await autoDeleteReply(interaction, '🧹 Résultats effacés.');
+        } else if (rawId.startsWith('search:page:')) {
+          // Pagination — re-run the last query with offset
+          const pageNum = parseInt(rawId.split(':')[2] ?? '1', 10);
+          const { getLastQuery, trackTempMessage: trackMsg, setLastQuery: setQ } = await import('./dashboard/search.js');
+          const lastQuery = getLastQuery(interaction.channelId);
+          if (lastQuery === null) {
+            await autoDeleteReply(interaction, '🔍 Pas de recherche en cours. Utilise le bouton Rechercher.');
+          } else {
+            const { search: ftsSearch, searchCount, enrichResults } = await import('./search/engine.js');
+            const { searchResults: buildSearchResultsV2 } = await import('./discord/component-builder-v2.js');
+            const offset = (pageNum - 1) * 8;
+            const results = ftsSearch(ctx.db, lastQuery, 8, offset);
+            const total = searchCount(ctx.db, lastQuery);
+            const enriched = enrichResults(ctx.db, results);
+            const payload = buildSearchResultsV2(enriched, lastQuery, pageNum, total);
+            await interaction.reply({ components: payload.components as never[], flags: payload.flags } as never);
+            if (interaction.channelId !== null) {
+              trackMsg(interaction.channelId, interaction.id);
+              setQ(interaction.channelId, lastQuery);
+            }
+          }
+        } else if (rawId.startsWith('search:suggest:')) {
+          // Create a suggestion from a veille article
+          const articleId = parseInt(rawId.split(':')[2] ?? '0', 10);
+          await interaction.deferReply({ ephemeral: true });
+          const article = ctx.db.prepare('SELECT id, title, translated_title, snippet, translated_snippet, url, score, pillar, suggested_angle, status FROM veille_articles WHERE id = ?')
+            .get(articleId) as { id: number; title: string; translated_title: string | null; snippet: string; translated_snippet: string | null; url: string; score: number; pillar: string; suggested_angle: string | null; status: string } | undefined;
+          if (article === undefined) {
+            await autoDeleteEditReply(interaction, '❌ Article introuvable.');
+          } else {
+            const title = article.translated_title ?? article.title;
+            const angle = article.suggested_angle ?? article.snippet.slice(0, 200);
+            const content = [
+              `**Hook :** ${title}`,
+              '',
+              `**Script :**`,
+              angle,
+              '',
+              `**Source :** ${article.url}`,
+            ].join('\n');
+            const result = ctx.db.prepare(`
+              INSERT INTO suggestions (veille_article_id, content, pillar, platform, format, status)
+              VALUES (?, ?, ?, 'both', 'post', 'pending')
+            `).run(article.id, content, article.pillar);
+            const suggestionId = Number(result.lastInsertRowid);
+            const { indexDocument } = await import('./search/engine.js');
+            indexDocument(ctx.db, { title, snippet: angle, content, sourceTable: 'suggestions', sourceId: suggestionId });
+            ctx.db.prepare("UPDATE veille_articles SET status = 'proposed' WHERE id = ? AND status = 'new'").run(articleId);
+            // Post suggestion to #idées
+            const { suggestion: buildSuggV2 } = await import('./discord/component-builder-v2.js');
+            const { sendSplit } = await import('./discord/message-splitter.js');
+            const payload = buildSuggV2({ id: suggestionId, content, pillar: article.pillar, platform: 'both' });
+            await sendSplit(ctx.channels.idees, payload);
+            await autoDeleteEditReply(interaction, `✅ Suggestion créée (#${String(suggestionId)}) et postée dans #idées.`);
+          }
+        } else if (rawId.startsWith('search:reactivate:')) {
+          // Reactivate an archived/skipped item
+          const parts = rawId.split(':');
+          const table = parts[2];
+          const itemId = parseInt(parts[3] ?? '0', 10);
+          if (table === 'veille_articles') {
+            ctx.db.prepare("UPDATE veille_articles SET status = 'new' WHERE id = ?").run(itemId);
+            await autoDeleteReply(interaction, '♻️ Article réactivé (status → new).');
+          } else if (table === 'suggestions') {
+            ctx.db.prepare("UPDATE suggestions SET status = 'pending' WHERE id = ?").run(itemId);
+            await autoDeleteReply(interaction, '♻️ Suggestion réactivée (status → pending).');
+          } else if (table === 'publications') {
+            ctx.db.prepare("UPDATE publications SET status = 'draft' WHERE id = ?").run(itemId);
+            await autoDeleteReply(interaction, '♻️ Publication réactivée (status → draft).');
+          } else {
+            await autoDeleteReply(interaction, '❌ Type inconnu.');
+          }
         } else if (rawId.startsWith('search:recent:')) {
           const type = rawId.split(':')[2] ?? 'articles';
           let results;
@@ -420,7 +597,7 @@ async function main(): Promise<void> {
         // ── Action buttons (match raw customId first) ──
         if (rawId === 'dash:veille:run') {
           await interaction.deferReply({ ephemeral: true });
-          await handleVeilleCronV2(ctx);
+          await handleVeilleCron(ctx);
           const dashMsgId = registry.getChannelMessageId(ctx.id, 'dashboard');
           if (dashMsgId !== null) {
             await refreshDashboard(ctx.channels.dashboard, dashMsgId, ctx.db, ctx.name, ctx.createdAt, false);
@@ -436,7 +613,7 @@ async function main(): Promise<void> {
           await autoDeleteReply(interaction, `**Catégories :**\n${lines.join('\n')}`, 15_000);
         } else if (rawId === 'dash:suggestions:generate') {
           await interaction.deferReply({ ephemeral: true });
-          await handleSuggestionsCronV2(ctx);
+          await handleSuggestionsCron(ctx);
           const dashMsgId = registry.getChannelMessageId(ctx.id, 'dashboard');
           if (dashMsgId !== null) {
             await refreshDashboard(ctx.channels.dashboard, dashMsgId, ctx.db, ctx.name, ctx.createdAt, false);
@@ -676,7 +853,8 @@ async function main(): Promise<void> {
             registry.unregister(ctx.id);
 
             // 4. Close + delete instance DB
-            ctx.db.close();
+            const { closeInstanceDatabase } = await import('./core/database.js');
+            closeInstanceDatabase(ctx.id);
             const { rm } = await import('node:fs/promises');
             await rm(`data/instances/${ctx.id}`, { recursive: true, force: true });
 
@@ -791,7 +969,7 @@ async function main(): Promise<void> {
           return;
         }
       }
-      await handleAdminMessageV2(message, ctx);
+      await handleAdminMessage(message, ctx);
     },
 
     // ─── Global interactions (DMs, onboarding) ───
@@ -802,7 +980,6 @@ async function main(): Promise<void> {
     // ─── DM text messages (wizard free text input) ───
     onDirectMessage: async (message) => {
       const { getActiveWizardSession, saveWizardSession } = await import('./onboarding/wizard/state-machine.js');
-      const { processDescription } = await import('./onboarding/wizard/describe.js');
 
       // Find active wizard session for this user across all guilds
       const row = globalDb.prepare(
@@ -866,13 +1043,132 @@ async function main(): Promise<void> {
         return;
       }
 
-      // Only handle text in steps that expect free text
+      // Handle text based on current step
       if (session.step === 'describe_project') {
-        const { message: responsePayload } = await processDescription(session, message.content);
+        // Free text fallback — parse into modal fields format
+        const { processDescribeModal } = await import('./onboarding/wizard/describe.js');
+        const { message: responsePayload } = await processDescribeModal(session, {
+          projectName: message.content.split('\n')[0]?.slice(0, 100) ?? 'mon-projet',
+          projectUrl: '',
+          projectNiche: message.content.slice(0, 200),
+          contentTypes: '',
+          platforms: 'tiktok, instagram',
+        });
         saveWizardSession(globalDb, session);
         await message.reply({ components: responsePayload.components as never[], flags: responsePayload.flags } as never);
+        return;
       }
-      // Other steps that might accept text can be added here
+
+      // Handle refine_project answers (text free response to 6 questions)
+      if (session.step === 'refine_project') {
+        const { processRefineAnswers } = await import('./onboarding/wizard/refine-project.js');
+        const { advanceStep } = await import('./onboarding/wizard/state-machine.js');
+        await message.react('⏳');
+        try {
+          const { message: responsePayload } = await processRefineAnswers(session, message.content);
+          // Auto-advance to validate_profile step
+          advanceStep(session);
+          saveWizardSession(globalDb, session);
+          await message.reply({ components: responsePayload.components as never[], flags: responsePayload.flags } as never);
+        } catch (error) {
+          const errMsg = error instanceof Error ? error.message : String(error);
+          getLogger().error({ error: errMsg }, 'Refine answers processing failed');
+          await message.reply({ content: `❌ Erreur lors de l'analyse : ${errMsg.slice(0, 200)}. Réessaie.` });
+        }
+        return;
+      }
+
+      // Handle modification text for any step (when wizard:modify was clicked)
+      const isModifying = (session.data as Record<string, unknown>)['_awaitingModification'] === true;
+      if (!isModifying) return;
+
+      // Clear the modification flag
+      (session.data as Record<string, unknown>)['_awaitingModification'] = false;
+
+      await message.react('⏳');
+
+      try {
+        if (session.step === 'review_categories') {
+          const { buildCategoriesDisplay } = await import('./onboarding/wizard/categories.js');
+          const { complete: llmComplete } = await import('./services/anthropic.js');
+          const { addToHistory, recordIteration } = await import('./onboarding/wizard/state-machine.js');
+
+          // Build full context of current categories
+          const currentCats = session.data.categories ?? [];
+          const catJson = JSON.stringify(currentCats.map((c, i) => ({
+            index: i + 1,
+            id: c.id,
+            label: c.label,
+            keywords: c.keywords,
+            engines: c.engines,
+            maxAgeHours: c.maxAgeHours,
+          })), null, 2);
+
+          addToHistory(session, 'user', message.content);
+
+          const modResponse = await llmComplete(
+            [
+              'Tu modifies une liste de catégories de veille selon les instructions de l\'utilisateur.',
+              'Applique EXACTEMENT ce que l\'utilisateur demande (retirer, ajouter, modifier).',
+              'Ne regénère PAS les catégories — modifie la liste existante.',
+              '',
+              'Retourne UNIQUEMENT le JSON modifié, sans explication :',
+              '{"categories": [{"id": "...", "label": "...", "keywords": {"en": [...], "fr": [...]}, "engines": [...], "maxAgeHours": N}]}',
+            ].join('\n'),
+            `Catégories actuelles :\n${catJson}\n\nInstruction utilisateur : ${message.content}`,
+            { maxTokens: 2048, temperature: 0.2 },
+          );
+
+          recordIteration(session, modResponse.tokensIn, modResponse.tokensOut);
+
+          try {
+            const { extractJson } = await import('./core/json-extractor.js');
+            const jsonText = extractJson(modResponse.text);
+            const parsed = JSON.parse(jsonText) as { categories: Array<{ id: string; label: string; keywords: { en: string[]; fr: string[] }; engines: string[]; maxAgeHours: number }> };
+            session.data.categories = parsed.categories.map((cat) => ({ ...cat, isActive: true }));
+          } catch {
+            // Parsing failed — tell the user
+            await message.react('❌');
+            await message.reply({ content: '⚠️ Je n\'ai pas pu appliquer la modification. Réessaie avec des instructions plus précises.' });
+            saveWizardSession(globalDb, session);
+            return;
+          }
+
+          saveWizardSession(globalDb, session);
+
+          // Display the modified categories (no regeneration)
+          const catPayload = buildCategoriesDisplay(session);
+          await message.react('✅');
+          await message.reply({ components: catPayload.components as never[], flags: catPayload.flags } as never);
+
+        } else if (session.step.startsWith('review_persona_')) {
+          // Modify persona section with user instructions (preserves existing content)
+          const { modifyPersonaSection } = await import('./onboarding/wizard/persona.js');
+          const sectionMap: Record<string, 'identity' | 'tone' | 'vocabulary' | 'art_direction' | 'examples'> = {
+            review_persona_identity: 'identity',
+            review_persona_tone: 'tone',
+            review_persona_vocabulary: 'vocabulary',
+            review_persona_art_direction: 'art_direction',
+            review_persona_examples: 'examples',
+          };
+          const section = sectionMap[session.step];
+          if (section !== undefined) {
+            const payload = await modifyPersonaSection(session, section, message.content);
+            saveWizardSession(globalDb, session);
+            await message.react('✅');
+            await message.reply({ components: payload.components as never[], flags: payload.flags } as never);
+          }
+        } else {
+          await message.reply({ content: '❌ Cette étape n\'accepte pas de modification texte. Utilise les boutons.' });
+        }
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        getLogger().error({ error: errMsg, step: session.step }, 'Wizard modification failed');
+        await message.react('❌');
+        await message.reply({ content: `⚠️ La modification a échoué : ${errMsg.slice(0, 200)}` });
+      }
+
+      saveWizardSession(globalDb, session);
     },
 
     // ─── Channel deleted ───
@@ -923,11 +1219,52 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
-  logger.info({ instances: registry.getAll().length, version: CURRENT_VERSION }, 'Le Chroniqueur V2 is fully operational');
+  logger.info({ instances: registry.getAll().length, version: CURRENT_VERSION }, 'Bot is fully operational');
+}
+
+function startDerivationQueue(ctx: InstanceContext): void {
+  const logger = getLogger();
+  resetStuckJobs(ctx.db);
+
+  const persona = personaLoader.loadForInstance(ctx.id, ctx.db);
+  const processor = createQueueProcessor(ctx.db, async (job) => {
+    const payload = JSON.parse(job.payload) as Record<string, unknown>;
+
+    if (job.type === 'text_adaptation' || job.type === 'thread_generation' || job.type === 'article_generation' || job.type === 'carousel_generation') {
+      return processDerivationJob(ctx.db, {
+        derivationId: payload['derivationId'] as number,
+        platform: payload['platform'] as string,
+        format: payload['format'] as string,
+        masterText: payload['masterText'] as string,
+        masterImagePrompt: (payload['masterImagePrompt'] as string | null) ?? null,
+        persona,
+      }, ctx.channels.production);
+    }
+
+    if (job.type === 'image_crop' || job.type === 'image_generation' || job.type === 'video_generation') {
+      const mediaPayload: Parameters<typeof processMediaJob>[1] = {
+        derivationId: payload['derivationId'] as number,
+        treeId: payload['treeId'] as number,
+      };
+      if (typeof payload['masterMediaId'] === 'number') {
+        mediaPayload.masterMediaId = payload['masterMediaId'];
+      }
+      if (typeof payload['masterText'] === 'string') {
+        mediaPayload.masterText = payload['masterText'];
+      }
+      return processMediaJob(ctx.db, mediaPayload, job.type, ctx.channels.production);
+    }
+
+    throw new Error(`Unknown job type: ${job.type}`);
+  });
+
+  processor.start();
+  logger.info({ instanceId: ctx.id }, 'Derivation queue processor started');
 }
 
 function startInstanceScheduler(ctx: InstanceContext, registry: InstanceRegistry): InstanceScheduler {
   const scheduler = new InstanceScheduler(ctx.id, ctx.db);
+  startDerivationQueue(ctx);
 
   const jobs: InstanceJob[] = [
     {
@@ -935,7 +1272,7 @@ function startInstanceScheduler(ctx: InstanceContext, registry: InstanceRegistry
       cronExpression: applyCronOffset(ctx.config.scheduler.veilleCron, ctx.cronOffsetMinutes),
       runOnMissed: true,
       handler: async () => {
-        await handleVeilleCronV2(ctx);
+        await handleVeilleCron(ctx);
         const dashMsgId = registry.getChannelMessageId(ctx.id, 'dashboard');
         if (dashMsgId !== null) {
           await refreshDashboard(ctx.channels.dashboard, dashMsgId, ctx.db, ctx.name, ctx.createdAt, false);
@@ -947,7 +1284,7 @@ function startInstanceScheduler(ctx: InstanceContext, registry: InstanceRegistry
       cronExpression: applyCronOffset(ctx.config.scheduler.suggestionsCron, ctx.cronOffsetMinutes),
       runOnMissed: true,
       handler: async () => {
-        await handleSuggestionsCronV2(ctx);
+        await handleSuggestionsCron(ctx);
         const dashMsgId = registry.getChannelMessageId(ctx.id, 'dashboard');
         if (dashMsgId !== null) {
           await refreshDashboard(ctx.channels.dashboard, dashMsgId, ctx.db, ctx.name, ctx.createdAt, false);
@@ -959,7 +1296,7 @@ function startInstanceScheduler(ctx: InstanceContext, registry: InstanceRegistry
       cronExpression: applyCronOffset(ctx.config.scheduler.rapportCron, ctx.cronOffsetMinutes),
       runOnMissed: false,
       handler: async () => {
-        await handleWeeklyRapportV2(ctx);
+        await handleWeeklyRapport(ctx);
       },
     },
   ];

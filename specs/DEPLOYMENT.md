@@ -22,7 +22,12 @@ Dokploy (VPS)
 docker-compose build + up
         │
         ├── tumulte-bot (Node.js)
-        └── tumulte-searxng (SearXNG)
+        ├── tumulte-searxng (SearXNG)
+        ├── postiz (social media publishing)
+        ├── postiz-db (PostgreSQL)
+        ├── postiz-redis (Redis)
+        ├── docker-proxy (Docker socket proxy)
+        └── caddy (HTTPS reverse proxy, optionnel)
 ```
 
 ## Configuration Dokploy
@@ -33,6 +38,31 @@ docker-compose build + up
 4. Build : docker-compose
 5. Variables d'environnement : saisies dans l'interface Dokploy
 6. Auto-deploy : activé sur push
+
+## HTTPS via Caddy (optionnel)
+
+Pour activer HTTPS (requis pour TikTok OAuth) :
+
+1. Pointer un domaine DNS (A record) vers l'IP du VPS
+2. Définir `POSTIZ_DOMAIN=postiz.mondomaine.com` dans `.env`
+3. Définir `POSTIZ_URL=https://postiz.mondomaine.com` dans `.env`
+4. Lancer avec le profil HTTPS : `docker compose --profile https up -d`
+
+Caddy obtient automatiquement un certificat Let's Encrypt et le renouvelle.
+
+### Architecture réseau (mode HTTPS)
+
+```
+Internet → :443 (Caddy, TLS) → postiz:5000 (HTTP interne)
+                                     ↑
+                              réseau Docker "internal"
+```
+
+### Prérequis
+
+- Port 80 et 443 libres sur le VPS (Caddy en a besoin pour le challenge ACME)
+- Un enregistrement DNS A pointant vers l'IP du serveur
+- Pas d'autre reverse proxy sur les mêmes ports
 
 ## Volumes persistants
 

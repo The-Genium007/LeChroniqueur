@@ -251,13 +251,7 @@ export function isHttpsAvailable(): boolean {
 }
 
 export function getAvailablePlatforms(): PlatformId[] {
-  const https = isHttpsAvailable();
-  return PLATFORM_IDS.filter((p) => {
-    const def = PLATFORM_CONFIG[p];
-    if (def === undefined) return false;
-    if (def.requiresHttps && !https) return false;
-    return true;
-  });
+  return PLATFORM_IDS.filter((p) => PLATFORM_CONFIG[p] !== undefined);
 }
 
 // ─── Env File Operations ───
@@ -385,6 +379,8 @@ export async function buildPostizScreen(
   const connectedSet = new Set(connectedPlatforms);
   const configuredSet = new Set(configured);
 
+  const https = isHttpsAvailable();
+
   // Build status lines
   const statusLines: string[] = [];
   for (const id of available) {
@@ -394,6 +390,8 @@ export async function buildPostizScreen(
       statusLines.push(`✅ **${def.label}** — connecté`);
     } else if (configuredSet.has(id)) {
       statusLines.push(`🔑 **${def.label}** — clés configurées, non connecté`);
+    } else if (def.requiresHttps && !https) {
+      statusLines.push(`🔒 **${def.label}** — requiert HTTPS`);
     }
   }
 
@@ -414,10 +412,12 @@ export async function buildPostizScreen(
     const buttons = chunk.map((id) => {
       const def = PLATFORM_CONFIG[id];
       if (def === undefined) return btn(`${prefix}:platform:${id}`, id, ButtonStyle.Secondary);
+      const needsHttps = def.requiresHttps && !https;
       const style = connectedSet.has(id) ? ButtonStyle.Success
         : configuredSet.has(id) ? ButtonStyle.Primary
         : ButtonStyle.Secondary;
-      return btn(`${prefix}:platform:${id}`, def.label, style, def.emoji);
+      const label = needsHttps ? `${def.label} 🔒` : def.label;
+      return btn(`${prefix}:platform:${id}`, label, style, def.emoji);
     });
     platformRows.push(row(...buttons));
   }
@@ -463,6 +463,7 @@ export function buildPostizMoreScreen(
   const extraPlatforms = available.slice(8);
   const connectedSet = new Set(connectedPlatforms);
   const configuredSet = new Set(configuredPlatforms);
+  const https = isHttpsAvailable();
 
   const platformRows: ReturnType<typeof row>[] = [];
   for (let i = 0; i < extraPlatforms.length; i += 4) {
@@ -470,10 +471,12 @@ export function buildPostizMoreScreen(
     const buttons = chunk.map((id) => {
       const def = PLATFORM_CONFIG[id];
       if (def === undefined) return btn(`${prefix}:platform:${id}`, id, ButtonStyle.Secondary);
+      const needsHttps = def.requiresHttps && !https;
       const style = connectedSet.has(id) ? ButtonStyle.Success
         : configuredSet.has(id) ? ButtonStyle.Primary
         : ButtonStyle.Secondary;
-      return btn(`${prefix}:platform:${id}`, def.label, style, def.emoji);
+      const label = needsHttps ? `${def.label} 🔒` : def.label;
+      return btn(`${prefix}:platform:${id}`, label, style, def.emoji);
     });
     platformRows.push(row(...buttons));
   }
@@ -507,31 +510,40 @@ export function buildPlatformDetail(
   }
 
   const redirectUri = getRedirectUri(platformId);
+  const https = isHttpsAvailable();
+  const needsHttps = def.requiresHttps && !https;
 
   const statusLine = isConnected ? '✅ Connecté dans Postiz'
     : isConfigured ? '🔑 Clés configurées — va dans Postiz pour connecter ton compte'
+    : needsHttps ? '🔒 Requiert HTTPS — configure un certificat SSL pour Postiz d\'abord'
     : '❌ Non configuré';
 
-  const buttons = [
-    btn(`${prefix}:keys:${platformId}`, 'Entrer les clés', ButtonStyle.Primary, '🔑'),
-  ];
+  const buttons: ReturnType<typeof btn>[] = [];
+  if (!needsHttps) {
+    buttons.push(btn(`${prefix}:keys:${platformId}`, 'Entrer les clés', ButtonStyle.Primary, '🔑'));
+  }
   if (isConfigured) {
     buttons.push(btn(`${prefix}:remove:${platformId}`, 'Supprimer', ButtonStyle.Danger, '🗑️'));
   }
   buttons.push(btn(`${prefix}:back`, 'Retour', ButtonStyle.Secondary, '◀️'));
 
-  return v2([buildContainer(getColor('info'), (c) => {
-    c.addTextDisplayComponents(txt([
-      `## ${def.emoji} ${def.label}`,
-      '',
-      `**Statut** : ${statusLine}`,
-      `**Console développeur** : ${def.devConsoleUrl}`,
-      `**Redirect URI** : \`${redirectUri}\``,
-      `**Scopes** : ${def.scopes}`,
-      '',
-      '**Instructions :**',
-      ...def.instructions,
-    ].join('\n')));
+  const lines = [
+    `## ${def.emoji} ${def.label}`,
+    '',
+    `**Statut** : ${statusLine}`,
+    `**Console développeur** : ${def.devConsoleUrl}`,
+    `**Redirect URI** : \`${redirectUri}\``,
+    `**Scopes** : ${def.scopes}`,
+  ];
+
+  if (needsHttps) {
+    lines.push('', '⚠️ Cette plateforme exige un Redirect URI en HTTPS. Configure un certificat SSL sur ton Postiz avant de continuer.');
+  }
+
+  lines.push('', '**Instructions :**', ...def.instructions);
+
+  return v2([buildContainer(getColor(needsHttps ? 'warning' : 'info'), (c) => {
+    c.addTextDisplayComponents(txt(lines.join('\n')));
     c.addSeparatorComponents(sep());
     c.addActionRowComponents(row(...buttons));
   })]);

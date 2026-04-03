@@ -20,48 +20,55 @@ set -euo pipefail
 # 2. Créer le répertoire d'installation
 mkdir -p lechroniqueur && cd lechroniqueur
 
-# 3. Télécharger docker-compose.yml et .env.example
-curl -fsSL https://raw.githubusercontent.com/.../docker-compose.yml -o docker-compose.yml
-curl -fsSL https://raw.githubusercontent.com/.../.env.example -o .env.example
+# 3. Télécharger docker-compose.yml, Caddyfile, et config SearXNG
+curl -fsSL .../docker-compose.prod.yml -o docker-compose.yml
+curl -fsSL .../config/Caddyfile -o config/Caddyfile
+curl -fsSL .../config/searxng/settings.yml -o config/searxng/settings.yml
 
-# 4. Poser les 3 questions
+# 4. Poser les 4 questions
 read -p "Discord Bot Token: " DISCORD_TOKEN
-read -p "URL publique de Postiz (ex: https://postiz.mondomaine.com): " POSTIZ_URL
+read -p "Domaine pour Postiz (vide = HTTP sans TikTok): " POSTIZ_DOMAIN
+read -p "Port local Postiz [4007]: " POSTIZ_PORT
+# Si domaine fourni → POSTIZ_URL = https://<domain>
+# Sinon → demander l'URL manuellement (ex: http://IP:4007)
 
 # 5. Générer les secrets automatiquement
 MASTER_ENCRYPTION_KEY=$(openssl rand -hex 32)
-POSTIZ_JWT_SECRET=$(openssl rand -hex 32)
-POSTIZ_DB_PASSWORD=$(openssl rand -hex 16)
+POSTIZ_JWT_SIGNING_KEY=$(openssl rand -hex 32)
 
-# 6. Générer le .env
+# 6. Générer le .env (incluant POSTIZ_DOMAIN pour Caddy)
 cat > .env << EOF
 DISCORD_TOKEN=${DISCORD_TOKEN}
 MASTER_ENCRYPTION_KEY=${MASTER_ENCRYPTION_KEY}
 POSTIZ_URL=${POSTIZ_URL}
-POSTIZ_JWT_SECRET=${POSTIZ_JWT_SECRET}
-POSTIZ_DB_PASSWORD=${POSTIZ_DB_PASSWORD}
+POSTIZ_PORT=${POSTIZ_PORT}
+POSTIZ_DOMAIN=${POSTIZ_DOMAIN}
+POSTIZ_JWT_SIGNING_KEY=${POSTIZ_JWT_SIGNING_KEY}
 EOF
 
 chmod 600 .env
 
-# 7. Créer les répertoires de données
-mkdir -p data config/searxng
-
-# 8. Télécharger la config SearXNG par défaut
-curl -fsSL https://raw.githubusercontent.com/.../config/searxng/settings.yml \
-  -o config/searxng/settings.yml
-
-# 9. Lancer
-docker compose up -d
-
-# 10. Afficher le résultat
-echo "✅ Le Chroniqueur est installé !"
-echo "   Invite le bot sur ton serveur Discord."
-echo "   L'onboarding se fera automatiquement en DM."
-echo ""
-echo "📊 Postiz sera accessible sur : ${POSTIZ_URL}"
-echo "📋 Logs : docker compose logs -f bot"
+# 7. Lancer (avec ou sans profil HTTPS selon le domaine)
+if [ -n "$POSTIZ_DOMAIN" ]; then
+  docker compose --profile https up -d
+else
+  docker compose up -d
+fi
 ```
+
+### Mode HTTPS (Caddy + Let's Encrypt)
+
+Si un domaine est fourni à l'installation :
+- `POSTIZ_URL` est automatiquement `https://<domaine>`
+- Caddy est activé via `--profile https`
+- Caddy écoute sur :80 (redirect) et :443 (TLS)
+- Certificat Let's Encrypt obtenu et renouvelé automatiquement
+- TikTok OAuth fonctionne (redirect URI en HTTPS)
+
+Si pas de domaine :
+- Postiz est exposé en HTTP sur `POSTIZ_PORT`
+- Caddy ne démarre pas
+- TikTok n'est pas disponible (l'onboarding l'indique clairement)
 
 ## Docker Compose complet
 

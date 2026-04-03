@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { getConfig } from '../core/config.js';
 import { getLogger } from '../core/logger.js';
+import { ApiNotConfiguredError, ApiOverloadedError, classifyApiError } from './api-errors.js';
 
 export interface AnthropicResponse {
   readonly text: string;
@@ -19,6 +20,10 @@ function getClient(): Anthropic {
   // Check if the API key changed (e.g. set during wizard onboarding)
   const config = getConfig();
   const currentKey = process.env['ANTHROPIC_API_KEY'] ?? config.ANTHROPIC_API_KEY;
+
+  if (currentKey.length === 0) {
+    throw new ApiNotConfiguredError('anthropic');
+  }
 
   if (_client !== undefined && _lastKey === currentKey) {
     return _client;
@@ -84,18 +89,17 @@ export async function complete(
 
       return result;
     } catch (error) {
-      lastError = error;
-      const msg = error instanceof Error ? error.message : String(error);
-      const isOverloaded = msg.includes('529') || msg.includes('overloaded') || msg.includes('529');
+      const classified = classifyApiError('anthropic', error);
+      lastError = classified;
 
-      if (isOverloaded && attempt < maxRetries) {
+      if (classified instanceof ApiOverloadedError && attempt < maxRetries) {
         const delayMs = attempt * 3000;
         logger.warn({ attempt, maxRetries, delayMs }, 'Anthropic overloaded, retrying');
         await new Promise((resolve) => { setTimeout(resolve, delayMs); });
         continue;
       }
 
-      throw error;
+      throw classified;
     }
   }
 

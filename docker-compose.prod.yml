@@ -1,5 +1,5 @@
 # docker-compose.prod.yml — Production self-hosted deployment
-# Includes: bot + SearXNG + Postiz + PostgreSQL + Redis + Docker socket proxy
+# Includes: bot + Caddy (HTTPS) + SearXNG + Postiz + Temporal + PostgreSQL + Redis + Docker socket proxy
 #
 # Install:
 #   curl -fsSL https://raw.githubusercontent.com/PowerGlove/LeChroniqueur/main/scripts/install.sh | bash
@@ -36,6 +36,29 @@ services:
     networks:
       - internal
 
+  # ─── Caddy (reverse proxy + automatic HTTPS via Let's Encrypt) ───
+  caddy:
+    image: caddy:2-alpine
+    container_name: lechroniqueur-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      POSTIZ_DOMAIN: "${POSTIZ_DOMAIN:-}"
+    volumes:
+      - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      postiz:
+        condition: service_healthy
+    networks:
+      - internal
+    profiles:
+      - https
+
   # ─── SearXNG (search engine) ───
   searxng:
     image: searxng/searxng:latest
@@ -62,16 +85,19 @@ services:
         condition: service_healthy
       postiz-redis:
         condition: service_healthy
+      temporal:
+        condition: service_started
     ports:
       - "${POSTIZ_PORT:-4007}:5000"
     environment:
       DATABASE_URL: "postgresql://postiz:postiz@postiz-db:5432/postiz"
       REDIS_URL: "redis://postiz-redis:6379"
-      JWT_SIGNING_KEY: "${POSTIZ_JWT_SIGNING_KEY}"
+      JWT_SECRET: "${POSTIZ_JWT_SIGNING_KEY}"
       MAIN_URL: "${POSTIZ_URL}"
       FRONTEND_URL: "${POSTIZ_URL}"
       NEXT_PUBLIC_BACKEND_URL: "${POSTIZ_URL}/api"
       BACKEND_INTERNAL_URL: "http://localhost:5000"
+      TEMPORAL_ADDRESS: "temporal:7233"
       IS_GENERAL: "true"
       RUN_CRON: "true"
       STORAGE_PROVIDER: "local"
@@ -88,6 +114,66 @@ services:
       timeout: 5s
       retries: 30
       start_period: 60s
+    networks:
+      - internal
+
+  # ─── Temporal (workflow engine requis par Postiz v2.12+) ───
+  temporal:
+    image: temporalio/auto-setup:latest
+    container_name: lechroniqueur-temporal
+    restart: unless-stopped
+    environment:
+      DB: "postgres12"
+      DB_PORT: "5432"
+      POSTGRES_USER: "temporal"
+      POSTGRES_PWD: "temporal"
+      POSTGRES_SEEDS: "temporal-db"
+      ENABLE_ES: "true"
+      ES_SEEDS: "temporal-es"
+      ES_VERSION: "v7"
+    depends_on:
+      temporal-db:
+        condition: service_healthy
+      temporal-es:
+        condition: service_healthy
+    networks:
+      - internal
+
+  # ─── PostgreSQL (BDD Temporal) ───
+  temporal-db:
+    image: postgres:16-alpine
+    container_name: lechroniqueur-temporal-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "temporal"
+      POSTGRES_HOST_AUTH_METHOD: "trust"
+    volumes:
+      - temporal_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - internal
+
+  # ─── Elasticsearch (search attributes Temporal) ───
+  temporal-es:
+    image: elasticsearch:7.17.27
+    container_name: lechroniqueur-temporal-es
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms256m -Xmx256m
+    volumes:
+      - temporal_es:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
     networks:
       - internal
 
@@ -143,6 +229,10 @@ volumes:
   postiz_uploads:
   postiz_pgdata:
   postiz_redis:
+  temporal_db:
+  temporal_es:
+  caddy_data:
+  caddy_config:
 
 networks:
   internal:

@@ -1,6 +1,8 @@
 import type { SqliteDatabase } from '../core/database.js';
 import { getConfig } from '../core/config.js';
 import { getLogger } from '../core/logger.js';
+import { computeLlmCostCents as computeProviderCost } from '../services/llm-providers.js';
+import { getLlmConfig } from '../services/llm-factory.js';
 
 export interface BudgetPeriod {
   readonly anthropicCents: number;
@@ -224,4 +226,41 @@ export function checkThresholds(db: SqliteDatabase): readonly BudgetAlert[] {
 export function isApiAllowed(db: SqliteDatabase): boolean {
   const monthly = getMonthlyTotal(db);
   return monthly.percentUsed < 100;
+}
+
+// ─── Multi-provider LLM cost tracking ───
+
+/**
+ * Records LLM usage with provider-aware cost calculation.
+ * Also updates legacy anthropic columns for backward compatibility.
+ */
+export function recordLlmUsage(
+  db: SqliteDatabase,
+  tokensIn: number,
+  tokensOut: number,
+): void {
+  const llmConfig = getLlmConfig();
+  const provider = llmConfig?.provider ?? 'anthropic';
+  const model = llmConfig?.model ?? 'claude-sonnet-4-6';
+  const costCents = computeProviderCost(provider, model, tokensIn, tokensOut);
+
+  ensureTodayRow(db);
+
+  // Update LLM-specific columns
+  db.prepare(`
+    UPDATE metrics SET
+      llm_cost_cents = llm_cost_cents + ?,
+      llm_provider = ?,
+      llm_model = ?
+    WHERE date = ?
+  `).run(costCents, provider, model, todayDateStr());
+
+  // Backward compat: also update anthropic columns
+  db.prepare(`
+    UPDATE metrics SET
+      anthropic_tokens_in = anthropic_tokens_in + ?,
+      anthropic_tokens_out = anthropic_tokens_out + ?,
+      anthropic_cost_cents = anthropic_cost_cents + ?
+    WHERE date = ?
+  `).run(tokensIn, tokensOut, costCents, todayDateStr());
 }

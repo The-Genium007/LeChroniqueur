@@ -3,6 +3,7 @@ import { getConfig } from '../core/config.js';
 import { getLogger } from '../core/logger.js';
 import { isApiAllowed } from '../budget/tracker.js';
 import type { SqliteDatabase } from '../core/database.js';
+import { ApiNotConfiguredError, classifyApiError } from './api-errors.js';
 
 // ─── Types ───
 
@@ -42,11 +43,13 @@ function getClient(): GoogleGenAI {
 
   const config = getConfig();
 
-  if (config.GOOGLE_AI_API_KEY.length === 0) {
-    throw new Error('GOOGLE_AI_API_KEY is not configured');
+  const envKey = process.env['GOOGLE_AI_API_KEY'] ?? config.GOOGLE_AI_API_KEY;
+
+  if (envKey.length === 0) {
+    throw new ApiNotConfiguredError('google');
   }
 
-  _client = new GoogleGenAI({ apiKey: config.GOOGLE_AI_API_KEY });
+  _client = new GoogleGenAI({ apiKey: envKey });
   return _client;
 }
 
@@ -69,14 +72,19 @@ export async function generateImages(
 
   logger.info({ model, prompt: prompt.slice(0, 80), count }, 'Generating images');
 
-  const response = await client.models.generateImages({
-    model,
-    prompt,
-    config: {
-      numberOfImages: count,
-      aspectRatio: options?.aspectRatio ?? '9:16',
-    },
-  });
+  let response;
+  try {
+    response = await client.models.generateImages({
+      model,
+      prompt,
+      config: {
+        numberOfImages: count,
+        aspectRatio: options?.aspectRatio ?? '9:16',
+      },
+    });
+  } catch (error) {
+    throw classifyApiError('google', error);
+  }
 
   const images: GeneratedImage[] = [];
 

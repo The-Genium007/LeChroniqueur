@@ -100,14 +100,16 @@ describe('component-builder-v2', () => {
   });
 
   describe('search', () => {
-    it('should build search results', () => {
-      const payload = searchResults([{ sourceTable: 'veille_articles', sourceId: 1, title: 'T', snippet: 'S' }], 'test', 1, 1);
-      expect(payload.components.length).toBe(1);
+    it('should build search results with individual cards', () => {
+      const payload = searchResults([{ sourceTable: 'veille_articles', sourceId: 1, title: 'T', snippet: 'S', status: 'new', score: 8 }], 'test', 1, 1);
+      // header + 1 result card + navigation = 3 containers
+      expect(payload.components.length).toBe(3);
     });
 
     it('should handle empty results', () => {
       const payload = searchResults([], 'nothing', 1, 0);
-      expect(payload.components.length).toBe(1);
+      // header + navigation = 2 containers
+      expect(payload.components.length).toBe(2);
     });
   });
 

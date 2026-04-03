@@ -108,9 +108,19 @@ export class InstanceScheduler {
   private async checkMissedRun(def: InstanceJob): Promise<void> {
     const logger = getLogger();
 
-    const lastRun = this.db.prepare(
-      'SELECT last_run_at FROM cron_runs WHERE job_name = ?',
-    ).get(def.name) as { last_run_at: string } | undefined;
+    let lastRun: { last_run_at: string } | undefined;
+    try {
+      lastRun = this.db.prepare(
+        'SELECT last_run_at FROM cron_runs WHERE job_name = ?',
+      ).get(def.name) as { last_run_at: string } | undefined;
+    } catch (dbError) {
+      const msg = dbError instanceof Error ? dbError.message : String(dbError);
+      if (msg.includes('not open') || msg.includes('database connection')) {
+        logger.warn({ instanceId: this.instanceId, job: def.name }, 'Database closed, skipping missed run check');
+        return;
+      }
+      throw dbError;
+    }
 
     if (lastRun === undefined) {
       // Never run before — run now
@@ -134,12 +144,22 @@ export class InstanceScheduler {
   }
 
   private recordRun(jobName: string, status: string, error?: string): void {
-    this.db.prepare(`
-      INSERT INTO cron_runs (job_name, last_run_at, status, error)
-      VALUES (?, datetime('now'), ?, ?)
-      ON CONFLICT(job_name)
-      DO UPDATE SET last_run_at = datetime('now'), status = excluded.status, error = excluded.error
-    `).run(jobName, status, error ?? null);
+    try {
+      this.db.prepare(`
+        INSERT INTO cron_runs (job_name, last_run_at, status, error)
+        VALUES (?, datetime('now'), ?, ?)
+        ON CONFLICT(job_name)
+        DO UPDATE SET last_run_at = datetime('now'), status = excluded.status, error = excluded.error
+      `).run(jobName, status, error ?? null);
+    } catch (dbError) {
+      // DB might be closed if instance was deleted during job execution
+      const msg = dbError instanceof Error ? dbError.message : String(dbError);
+      if (msg.includes('not open') || msg.includes('database connection')) {
+        getLogger().warn({ instanceId: this.instanceId, job: jobName }, 'Database closed, skipping cron run record');
+      } else {
+        throw dbError;
+      }
+    }
   }
 }
 

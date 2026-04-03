@@ -9,6 +9,7 @@ import {
   videoSegmentResult as buildVideoSegmentResult,
   budgetAlert as buildBudgetAlert,
   errorMessage,
+  apiErrorMessage,
 } from '../discord/component-builder-v2.js';
 import { sendSplit, replySplit } from '../discord/message-splitter.js';
 
@@ -85,9 +86,9 @@ export async function handleGenerateImages(
       await sendSplit(targetChannel, alertPayload);
     }
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    logger.error({ error: msg, suggestionId }, 'Image generation failed');
-    await replySplit(interaction, errorMessage(`Génération d'images échouée : ${msg}`));
+    const err = error instanceof Error ? error : new Error(String(error));
+    logger.error({ error: err.message, suggestionId }, 'Image generation failed');
+    await replySplit(interaction, apiErrorMessage(err));
   }
 }
 
@@ -139,20 +140,26 @@ export async function handleGenerateVideoSegment(
       await sendSplit(targetChannel, alertPayload);
     }
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    logger.error({ error: msg, suggestionId }, 'Video generation failed');
-    await replySplit(interaction, errorMessage(`Génération vidéo échouée : ${msg}`));
+    const err = error instanceof Error ? error : new Error(String(error));
+    logger.error({ error: err.message, suggestionId }, 'Video generation failed');
+    await replySplit(interaction, apiErrorMessage(err));
   }
 }
 
-function buildImagePrompt(suggestionContent: string): string {
-  // Extract the key visual elements from the suggestion
-  // The persona DA (palette, ambiance) is injected here
+const DEFAULT_IMAGE_STYLE = [
+  'Style: Modern, clean, professional.',
+  'Color palette: neutral tones with accent colors.',
+  'No text in the image. Abstract or conceptual illustration preferred.',
+  'The image should visually represent the topic of the content.',
+].join('\n');
+
+export function buildImagePrompt(suggestionContent: string, artDirection?: string): string {
+  const style = artDirection !== undefined && artDirection.length > 0
+    ? artDirection.slice(0, 600)
+    : DEFAULT_IMAGE_STYLE;
+
   return [
-    'Style: Dark fantasy, warm tones, parchment texture.',
-    'Color palette: backgrounds #1A1210, text areas #2A2220, gold accents #C8A87C, cream text #F0DCC0.',
-    'Atmosphere: Ancient parchment in a dungeon, warm, immersive, fantasy RPG.',
-    'No text in the image. No faces. Mysterious hooded figure if character needed.',
+    style,
     '',
     'Scene description based on this content:',
     suggestionContent.slice(0, 500),

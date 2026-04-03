@@ -31,6 +31,7 @@ interface SearchSession {
   readonly channel: TextChannel;
   tempMessageIds: string[];
   timeoutHandle: ReturnType<typeof setTimeout> | null;
+  lastQuery: string | null;
 }
 
 const sessions = new Map<string, SearchSession>(); // channelId → session
@@ -45,7 +46,19 @@ export function registerSearchChannel(
     channel,
     tempMessageIds: [],
     timeoutHandle: null,
+    lastQuery: null,
   });
+}
+
+export function setLastQuery(channelId: string, query: string): void {
+  const session = sessions.get(channelId);
+  if (session !== undefined) {
+    session.lastQuery = query;
+  }
+}
+
+export function getLastQuery(channelId: string): string | null {
+  return sessions.get(channelId)?.lastQuery ?? null;
 }
 
 export function trackTempMessage(channelId: string, messageId: string): void {
@@ -111,6 +124,7 @@ export async function clearSearchResults(channel: TextChannel, channelId: string
 
 /**
  * Clean search channel on boot — remove all messages except the permanent interface.
+ * Paginates and handles messages older than 14 days individually.
  */
 export async function cleanSearchChannelOnBoot(
   channel: TextChannel,
@@ -119,12 +133,51 @@ export async function cleanSearchChannelOnBoot(
   const logger = getLogger();
 
   try {
-    const messages = await channel.messages.fetch({ limit: 50 });
-    const toDelete = messages.filter((m: Message) => m.id !== permanentMessageId);
+    const botId = channel.client.user?.id;
+    let deleted = 0;
+    let lastId: string | undefined;
 
-    if (toDelete.size > 0) {
-      await channel.bulkDelete(toDelete);
-      logger.info({ count: toDelete.size, channelId: channel.id }, 'Search channel cleaned on boot');
+    for (let page = 0; page < 5; page++) {
+      const options: { limit: number; before?: string } = { limit: 100 };
+      if (lastId !== undefined) options.before = lastId;
+
+      const messages = await channel.messages.fetch(options);
+      if (messages.size === 0) break;
+
+      const toDelete = messages.filter(
+        (m: Message) => m.id !== permanentMessageId && (botId === undefined || m.author.id === botId),
+      );
+
+      const fourteenDaysAgo = Date.now() - 14 * 24 * 60 * 60 * 1000;
+      const recent = toDelete.filter((m: Message) => m.createdTimestamp > fourteenDaysAgo);
+      const old = toDelete.filter((m: Message) => m.createdTimestamp <= fourteenDaysAgo);
+
+      if (recent.size > 1) {
+        try {
+          await channel.bulkDelete(recent);
+          deleted += recent.size;
+        } catch {
+          for (const [, m] of recent) {
+            try { await m.delete(); deleted++; } catch { /* already deleted */ }
+          }
+        }
+      } else if (recent.size === 1) {
+        const single = recent.first();
+        if (single !== undefined) {
+          try { await single.delete(); deleted++; } catch { /* already deleted */ }
+        }
+      }
+
+      for (const [, m] of old) {
+        try { await m.delete(); deleted++; } catch { /* already deleted */ }
+      }
+
+      lastId = messages.last()?.id;
+      if (messages.size < 100) break;
+    }
+
+    if (deleted > 0) {
+      logger.info({ count: deleted, channelId: channel.id }, 'Search channel cleaned on boot');
     }
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);

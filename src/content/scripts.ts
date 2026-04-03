@@ -1,5 +1,6 @@
 import { complete } from '../services/anthropic.js';
 import { getLogger } from '../core/logger.js';
+import type { SqliteDatabase } from '../core/database.js';
 import { personaLoader } from '../core/persona-loader.js';
 
 export interface FinalScript {
@@ -11,7 +12,10 @@ export interface FinalScript {
   readonly notes: string;
 }
 
-function loadPersona(): string {
+function loadPersona(instanceId?: string, db?: SqliteDatabase): string {
+  if (instanceId !== undefined && db !== undefined) {
+    return personaLoader.loadForInstance(instanceId, db);
+  }
   return personaLoader.loadLegacy();
 }
 
@@ -19,9 +23,11 @@ export async function generateFinalScript(
   suggestionContent: string,
   platform: string,
   format: string,
+  instanceId?: string,
+  db?: SqliteDatabase,
 ): Promise<FinalScript> {
   const logger = getLogger();
-  const persona = loadPersona();
+  const persona = loadPersona(instanceId, db);
 
   const userMessage = [
     'Transforme cette suggestion en script FINAL prêt à produire.',
@@ -42,8 +48,7 @@ export async function generateFinalScript(
     'RÈGLES :',
     '- Le texte overlay doit être COURT et PERCUTANT',
     '- Le script doit être assez détaillé pour qu\'un créateur puisse produire le contenu sans poser de questions',
-    '- Tutoiement total, ton du Chroniqueur',
-    '- Emojis autorisés : 🎲 ⚔️ 🐉 🔥 💀 📜 ✨',
+    '- Respecte le ton, le vocabulaire et les emojis définis dans ton persona',
     '',
     'Réponds en JSON :',
     '{"textOverlay": "...", "fullScript": "...", "hashtags": "...", "platform": "...", "suggestedTime": "...", "notes": "..."}',

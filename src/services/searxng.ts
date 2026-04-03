@@ -107,6 +107,10 @@ export async function search(
 
     const data = (await response.json()) as SearxngApiResponse;
 
+    if (data.results.length === 0) {
+      logger.debug({ query, status: response.status, numberOfResults: data.number_of_results }, 'SearXNG returned 0 results');
+    }
+
     return data.results.map((r) => ({
       url: r.url,
       title: r.title,

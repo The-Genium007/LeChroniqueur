@@ -259,6 +259,192 @@ const migrations: readonly Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_config_history_date ON config_history(changed_at DESC)
     `,
   },
+  // ─── V2 Phase : Content Derivation ───
+  {
+    name: '016_create_derivation_trees',
+    up: `
+      CREATE TABLE IF NOT EXISTS derivation_trees (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        suggestion_id INTEGER NOT NULL REFERENCES suggestions(id),
+        master_text TEXT NOT NULL,
+        master_image_prompt TEXT,
+        master_media_id INTEGER REFERENCES media(id),
+        status TEXT NOT NULL DEFAULT 'draft',
+        discord_message_id TEXT,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        validated_at DATETIME,
+        invalidated_at DATETIME
+      );
+      CREATE INDEX IF NOT EXISTS idx_derivation_trees_suggestion ON derivation_trees(suggestion_id);
+      CREATE INDEX IF NOT EXISTS idx_derivation_trees_status ON derivation_trees(status)
+    `,
+  },
+  {
+    name: '017_create_derivations',
+    up: `
+      CREATE TABLE IF NOT EXISTS derivations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tree_id INTEGER NOT NULL REFERENCES derivation_trees(id),
+        platform TEXT NOT NULL,
+        format TEXT NOT NULL,
+        adapted_text TEXT,
+        media_type TEXT,
+        media_prompt TEXT,
+        media_id INTEGER REFERENCES media(id),
+        status TEXT NOT NULL DEFAULT 'pending',
+        postiz_post_id TEXT,
+        discord_thread_id TEXT,
+        discord_message_id TEXT,
+        scheduled_at DATETIME,
+        published_at DATETIME,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        validated_at DATETIME,
+        rejected_at DATETIME,
+        modification_notes TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_derivations_tree ON derivations(tree_id);
+      CREATE INDEX IF NOT EXISTS idx_derivations_status ON derivations(status);
+      CREATE INDEX IF NOT EXISTS idx_derivations_platform ON derivations(platform)
+    `,
+  },
+  {
+    name: '018_create_generation_queue',
+    up: `
+      CREATE TABLE IF NOT EXISTS generation_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type TEXT NOT NULL,
+        derivation_id INTEGER REFERENCES derivations(id),
+        tree_id INTEGER NOT NULL REFERENCES derivation_trees(id),
+        priority INTEGER NOT NULL DEFAULT 0,
+        payload TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'queued',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL DEFAULT 3,
+        result TEXT,
+        error TEXT,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        started_at DATETIME,
+        completed_at DATETIME
+      );
+      CREATE INDEX IF NOT EXISTS idx_queue_status ON generation_queue(status, priority DESC, created_at)
+    `,
+  },
+  {
+    name: '019_create_social_metrics',
+    up: `
+      CREATE TABLE IF NOT EXISTS social_metrics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        publication_id INTEGER REFERENCES publications(id),
+        derivation_id INTEGER REFERENCES derivations(id),
+        postiz_post_id TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        metric_name TEXT NOT NULL,
+        metric_value INTEGER NOT NULL DEFAULT 0,
+        metric_date DATE NOT NULL,
+        collected_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE INDEX IF NOT EXISTS idx_social_metrics_publication ON social_metrics(publication_id);
+      CREATE INDEX IF NOT EXISTS idx_social_metrics_platform_date ON social_metrics(platform, metric_date);
+      CREATE INDEX IF NOT EXISTS idx_social_metrics_name ON social_metrics(metric_name)
+    `,
+  },
+  {
+    name: '020_create_optimal_slots',
+    up: `
+      CREATE TABLE IF NOT EXISTS optimal_slots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        platform TEXT NOT NULL,
+        day_of_week INTEGER NOT NULL,
+        hour INTEGER NOT NULL,
+        score REAL NOT NULL DEFAULT 0.0,
+        sample_size INTEGER NOT NULL DEFAULT 0,
+        season_context TEXT,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(platform, day_of_week, hour)
+      );
+      CREATE INDEX IF NOT EXISTS idx_optimal_slots_platform ON optimal_slots(platform, score DESC)
+    `,
+  },
+  {
+    name: '021_add_derivation_refs_to_publications',
+    up: `
+      ALTER TABLE publications ADD COLUMN derivation_id INTEGER REFERENCES derivations(id);
+      ALTER TABLE publications ADD COLUMN tree_id INTEGER REFERENCES derivation_trees(id)
+    `,
+  },
+  // ─── V2 Phase : Multi-provider LLM ───
+  {
+    name: '022_add_llm_metrics',
+    up: `
+      ALTER TABLE metrics ADD COLUMN llm_cost_cents INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE metrics ADD COLUMN llm_provider TEXT;
+      ALTER TABLE metrics ADD COLUMN llm_model TEXT
+    `,
+  },
+  // ─── V2 Phase : Veille V2 (multi-source, resurfacing, scheduler) ───
+  {
+    name: '023_create_veille_sources',
+    up: `
+      CREATE TABLE IF NOT EXISTS veille_sources (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        config TEXT NOT NULL DEFAULT '{}',
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(type)
+      )
+    `,
+  },
+  {
+    name: '024_create_schedule_config',
+    up: `
+      CREATE TABLE IF NOT EXISTS schedule_config (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        mode TEXT NOT NULL DEFAULT 'daily',
+        veille_day INTEGER,
+        veille_hour INTEGER NOT NULL DEFAULT 7,
+        publication_days TEXT NOT NULL DEFAULT '[1,2,3,4,5]',
+        suggestions_per_cycle INTEGER NOT NULL DEFAULT 3,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `,
+  },
+  {
+    name: '025_add_veille_articles_v2_columns',
+    up: `
+      ALTER TABLE veille_articles ADD COLUMN skip_count INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE veille_articles ADD COLUMN deep_dive_content TEXT;
+      ALTER TABLE veille_articles ADD COLUMN source_type TEXT NOT NULL DEFAULT 'searxng';
+      ALTER TABLE veille_articles ADD COLUMN resurfaced_count INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE veille_articles ADD COLUMN last_resurfaced_at DATETIME
+    `,
+  },
+  {
+    name: '026_create_instance_profile',
+    up: `
+      CREATE TABLE IF NOT EXISTS instance_profile (
+        id               INTEGER PRIMARY KEY DEFAULT 1,
+        project_name     TEXT NOT NULL,
+        project_niche    TEXT NOT NULL,
+        project_description TEXT NOT NULL DEFAULT '',
+        project_language TEXT NOT NULL DEFAULT 'fr',
+        project_url      TEXT,
+        target_platforms  TEXT NOT NULL DEFAULT '[]',
+        target_formats    TEXT NOT NULL DEFAULT '[]',
+        content_types     TEXT NOT NULL DEFAULT '[]',
+        include_domains   TEXT NOT NULL DEFAULT '[]',
+        exclude_domains   TEXT NOT NULL DEFAULT '[]',
+        negative_keywords TEXT NOT NULL DEFAULT '[]',
+        pillars           TEXT NOT NULL DEFAULT '["trend","tuto","community","product"]',
+        onboarding_context TEXT NOT NULL DEFAULT '',
+        calibrated_examples TEXT,
+        calibrated_at       DATETIME,
+        created_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `,
+  },
 ];
 
 export function runMigrations(db: Database): void {

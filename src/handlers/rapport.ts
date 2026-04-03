@@ -4,8 +4,13 @@ import { getLogger } from '../core/logger.js';
 import { getProfile } from '../feedback/preference-learner.js';
 import { recalculate } from '../feedback/preference-learner.js';
 import { getWeeklyTotal, getMonthlyTotal } from '../budget/tracker.js';
-import { weeklyReport as buildWeeklyReportV2 } from '../discord/component-builder-v2.js';
+import { weeklyReport as buildWeeklyReportV2, analyticsReport as buildAnalyticsReport } from '../discord/component-builder-v2.js';
+import { sendSplit } from '../discord/message-splitter.js';
 import type { InstanceContext } from '../registry/instance-context.js';
+import { collectWeeklyMetrics } from '../analytics/collector.js';
+import { getWeeklyStatsByPlatform, formatWeeklyStatsForReport } from '../analytics/aggregator.js';
+import { aiAnalyzeSlots, formatSlotRecommendations } from '../analytics/slot-optimizer.js';
+import { personaLoader } from '../core/persona-loader.js';
 
 interface WeekTopArticle {
   readonly title: string;
@@ -152,20 +157,63 @@ async function runRapportPipeline(
   logger.info('Weekly rapport sent');
 }
 
-// ─── V2: InstanceContext entry point ───
+async function runAnalyticsPipeline(
+  db: SqliteDatabase,
+  veilleChannel: TextChannel,
+  configuredPlatforms: readonly string[],
+  persona: string,
+): Promise<void> {
+  const logger = getLogger();
 
-export async function handleWeeklyRapportV2(ctx: InstanceContext): Promise<void> {
+  // 1. Collect metrics from Postiz
+  try {
+    const collectionResult = await collectWeeklyMetrics(db);
+    logger.info(collectionResult, 'Weekly metrics collected');
+  } catch (error) {
+    logger.error(
+      { error: error instanceof Error ? error.message : String(error) },
+      'Failed to collect weekly metrics',
+    );
+  }
+
+  // 2. Aggregate stats
+  const weeklyStats = getWeeklyStatsByPlatform(db);
+  const statsText = formatWeeklyStatsForReport(weeklyStats);
+
+  // 3. AI slot analysis
+  let slotsText: string;
+  try {
+    const { analysis, aiReasoning } = await aiAnalyzeSlots(db, configuredPlatforms, persona);
+    slotsText = formatSlotRecommendations(analysis);
+    if (aiReasoning.length > 0) {
+      slotsText += `\n\n**🤖 Analyse IA**\n${aiReasoning}`;
+    }
+  } catch (error) {
+    logger.error(
+      { error: error instanceof Error ? error.message : String(error) },
+      'AI slot analysis failed',
+    );
+    slotsText = 'Analyse des créneaux indisponible cette semaine.';
+  }
+
+  // 4. Send analytics report
+  const analyticsPayload = buildAnalyticsReport({
+    weeklyStats: statsText,
+    slotRecommendations: slotsText,
+  });
+
+  await sendSplit(veilleChannel, analyticsPayload);
+
+  logger.info('Analytics report sent');
+}
+
+export async function handleWeeklyRapport(ctx: InstanceContext): Promise<void> {
   await runRapportPipeline(ctx.db, ctx.channels.veille);
-}
-
-// ─── Legacy entry point ───
-
-interface RapportDeps {
-  readonly db: SqliteDatabase;
-  readonly veilleChannel: TextChannel;
-  readonly adminChannel: TextChannel;
-}
-
-export async function handleWeeklyRapport(deps: RapportDeps): Promise<void> {
-  await runRapportPipeline(deps.db, deps.veilleChannel);
+  const persona = personaLoader.loadForInstance(ctx.id, ctx.db);
+  await runAnalyticsPipeline(
+    ctx.db,
+    ctx.channels.veille,
+    ctx.config.content.platforms,
+    persona,
+  );
 }

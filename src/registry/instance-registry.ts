@@ -7,6 +7,7 @@ import { getConfig, DEFAULT_INSTANCE_CONFIG, type InstanceConfig, type InstanceV
 import { getLogger } from '../core/logger.js';
 import { personaLoader } from '../core/persona-loader.js';
 import { getCategoriesFromDb } from '../veille/queries.js';
+import { getProfile, buildFallbackProfile, type InstanceProfile } from '../core/instance-profile.js';
 import type {
   InstanceContext,
   InstanceChannelMap,
@@ -73,8 +74,11 @@ export class InstanceRegistry {
     // Load categories from instance DB
     const categories = getCategoriesFromDb(db);
 
-    // Build config from DB overrides + defaults
-    const instanceConfig = this.buildInstanceConfig(db, row.name, persona, categories);
+    // Load instance profile (V3) or build fallback for V2 instances
+    const profile: InstanceProfile = getProfile(db) ?? buildFallbackProfile(row.name);
+
+    // Build config from DB overrides + defaults + profile
+    const instanceConfig = this.buildInstanceConfig(db, row.name, persona, categories, profile);
 
     return {
       id: row.id,
@@ -83,6 +87,7 @@ export class InstanceRegistry {
       ownerId: row.owner_id,
       categoryId: row.category_id,
       config: instanceConfig,
+      profile,
       db,
       channels,
       secrets,
@@ -152,6 +157,7 @@ export class InstanceRegistry {
     name: string,
     persona: string,
     categories: readonly InstanceVeilleCategory[],
+    profile: InstanceProfile,
   ): InstanceConfig {
     const overrides = new Map<string, string>();
     const rows = db.prepare('SELECT key, value FROM config_overrides').all() as Array<{ key: string; value: string }>;
@@ -185,9 +191,9 @@ export class InstanceRegistry {
       content: {
         suggestionsPerCycle: getNum('suggestionsPerCycle', DEFAULT_INSTANCE_CONFIG.content.suggestionsPerCycle),
         minScoreToPropose: getNum('minScoreToPropose', DEFAULT_INSTANCE_CONFIG.content.minScoreToPropose),
-        platforms: DEFAULT_INSTANCE_CONFIG.content.platforms,
-        formats: DEFAULT_INSTANCE_CONFIG.content.formats,
-        pillars: DEFAULT_INSTANCE_CONFIG.content.pillars,
+        platforms: profile.targetPlatforms.length > 0 ? profile.targetPlatforms : DEFAULT_INSTANCE_CONFIG.content.platforms,
+        formats: profile.targetFormats.length > 0 ? profile.targetFormats : DEFAULT_INSTANCE_CONFIG.content.formats,
+        pillars: profile.pillars.length > 0 ? profile.pillars : DEFAULT_INSTANCE_CONFIG.content.pillars,
       },
       theme: { ...DEFAULT_INSTANCE_CONFIG.theme },
     };

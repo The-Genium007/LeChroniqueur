@@ -135,3 +135,46 @@ export async function listPosts(
     `/posts?start=${startStr}&end=${endStr}`,
   );
 }
+
+// ─── Analytics ───
+
+export interface PostizAnalyticsDataPoint {
+  readonly total: string;
+  readonly date: string;
+}
+
+export interface PostizAnalyticsMetric {
+  readonly label: string;
+  readonly data: readonly PostizAnalyticsDataPoint[];
+  readonly percentageChange: number;
+}
+
+/**
+ * Gets analytics for a specific published post.
+ * @param postId - The Postiz post ID
+ * @param days - Number of days to look back (7, 30, or 90)
+ */
+export async function getPostAnalytics(
+  postId: string,
+  days: number = 7,
+): Promise<readonly PostizAnalyticsMetric[]> {
+  return apiRequest<PostizAnalyticsMetric[]>(
+    'GET',
+    `/analytics/post/${postId}?date=${String(days)}`,
+  );
+}
+
+/**
+ * Gets analytics for a platform integration (account-level metrics).
+ * @param integrationId - The Postiz integration ID
+ * @param days - Number of days to look back (7, 30, or 90)
+ */
+export async function getPlatformAnalytics(
+  integrationId: string,
+  days: number = 7,
+): Promise<readonly PostizAnalyticsMetric[]> {
+  return apiRequest<PostizAnalyticsMetric[]>(
+    'GET',
+    `/analytics/${integrationId}?date=${String(days)}`,
+  );
+}
