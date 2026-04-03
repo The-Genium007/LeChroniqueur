@@ -4,12 +4,13 @@ import type { VeilleCategory } from '../queries.js';
 import type { RawArticle } from '../collector.js';
 import { collectFromSearxng } from './searxng-enhanced.js';
 import { collectFromRss } from './rss.js';
-import { collectFromYouTube } from './youtube-transcript.js';
+import { collectFromReddit } from './reddit.js';
+import { collectFromYouTubeData } from './youtube-data.js';
 import { collectFromWebSearch } from './web-search.js';
 
 // ─── Types ───
 
-export type SourceType = 'searxng' | 'rss' | 'reddit' | 'youtube_transcript' | 'web_search';
+export type SourceType = 'searxng' | 'rss' | 'reddit' | 'youtube' | 'web_search';
 
 export interface VeilleSourceConfig {
   readonly type: SourceType;
@@ -50,7 +51,8 @@ export function getDefaultSources(): readonly VeilleSourceConfig[] {
   return [
     { type: 'searxng', enabled: true, config: {} },
     { type: 'rss', enabled: false, config: { urls: [] } },
-    { type: 'youtube_transcript', enabled: false, config: { keywords: [], maxResults: 10 } },
+    { type: 'reddit', enabled: false, config: { subreddits: [] } },
+    { type: 'youtube', enabled: false, config: { keywords: [], maxResults: 10 } },
     { type: 'web_search', enabled: false, config: {} },
   ];
 }
@@ -108,8 +110,11 @@ export async function collectFromAllSources(
         case 'rss':
           articles = await collectFromRss(source.config);
           break;
-        case 'youtube_transcript':
-          articles = await collectFromYouTube(categories, source.config);
+        case 'reddit':
+          articles = await collectFromReddit(categories, source.config);
+          break;
+        case 'youtube':
+          articles = await collectFromYouTubeData(categories, source.config, db);
           break;
         case 'web_search':
           articles = await collectFromWebSearch(categories, source.config);

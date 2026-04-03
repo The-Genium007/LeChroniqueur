@@ -47,7 +47,7 @@ import {
 import { validateLlmKey } from '../api-keys.js';
 import { getProvider as getLlmProvider } from '../../services/llm-providers.js';
 import { buildConfirmation } from './confirm.js';
-import { validateAnthropicKey, validateGoogleAiKey, storeInstanceSecret } from '../api-keys.js';
+import { validateAnthropicKey, storeInstanceSecret } from '../api-keys.js';
 import {
   PLATFORM_CONFIG,
   type PlatformId,
@@ -640,7 +640,7 @@ export async function handleWizardInteraction(
   } else if (customId === 'wizard:source:config:reddit') {
     await interaction.showModal(buildRedditConfigModal());
 
-  } else if (customId === 'wizard:source:config:youtube_transcript') {
+  } else if (customId === 'wizard:source:config:youtube') {
     await interaction.showModal(buildYouTubeConfigModal());
 
   // ─── Schedule buttons ───
@@ -734,15 +734,15 @@ export async function handleWizardInteraction(
     }
 
   } else if (customId === 'wizard:llm:confirmed') {
-    // LLM confirmed → ask for Google AI key (same flow as after old Anthropic key validation)
+    // LLM confirmed → ask for Google Cloud key (images/videos + YouTube Data)
     if (!interaction.replied && !interaction.deferred) {
       await interaction.deferReply({ ephemeral: true });
     }
     try { await interaction.message.delete(); } catch { /* already deleted */ }
     await interaction.editReply({
-      content: '✅ **Provider IA configuré !**\n\nMaintenant, la clé Google AI (optionnel — pour la génération d\'images et vidéos).',
+      content: '✅ **Provider IA configuré !**\n\nMaintenant, la clé Google Cloud (optionnel — images, vidéos et YouTube Data).\nCrée une clé sur [Google Cloud Console](https://console.cloud.google.com/apis/credentials) avec les APIs **Generative Language** et **YouTube Data v3** activées.',
       components: [row(
-        btn('onboard:key:google', 'Entrer clé Google AI', ButtonStyle.Primary, '🔑'),
+        btn('onboard:key:google', 'Entrer clé Google Cloud', ButtonStyle.Primary, '🔑'),
         btn('onboard:skip:google', 'Plus tard', ButtonStyle.Secondary, '⏭️'),
       )],
     });
@@ -755,12 +755,12 @@ export async function handleWizardInteraction(
 function buildGoogleKeyModal(): ModalBuilder {
   return new ModalBuilder()
     .setCustomId('wizard:modal:google')
-    .setTitle('Clé API Google AI')
+    .setTitle('Clé Google Cloud')
     .addComponents(
       new ActionRowBuilder<TextInputBuilder>().addComponents(
         new TextInputBuilder()
           .setCustomId('api_key')
-          .setLabel('Clé API Google AI (AIza...)')
+          .setLabel('Clé API Google Cloud (AIza...)')
           .setStyle(TextInputStyle.Short)
           .setPlaceholder('AIza...')
           .setRequired(true),
@@ -825,11 +825,11 @@ async function handleModalSubmit(
       saveWizardSession(globalDb, session);
     }
 
-    // Ask for Google AI key — use plain content + ActionRow (ephemeral doesn't support V2 containers)
+    // Ask for Google Cloud key — use plain content + ActionRow (ephemeral doesn't support V2 containers)
     await interaction.editReply({
-      content: '✅ **Clé Anthropic validée !**\n\nMaintenant, la clé Google AI (optionnel — pour la génération d\'images et vidéos).',
+      content: '✅ **Clé Anthropic validée !**\n\nMaintenant, la clé Google Cloud (optionnel — images, vidéos et YouTube Data).\nCrée une clé sur [Google Cloud Console](https://console.cloud.google.com/apis/credentials) avec les APIs **Generative Language** et **YouTube Data v3** activées.',
       components: [row(
-        btn('onboard:key:google', 'Entrer clé Google AI', ButtonStyle.Primary, '🔑'),
+        btn('onboard:key:google', 'Entrer clé Google Cloud', ButtonStyle.Primary, '🔑'),
         btn('onboard:skip:google', 'Plus tard', ButtonStyle.Secondary, '⏭️'),
       )],
     });
@@ -840,11 +840,19 @@ async function handleModalSubmit(
     const apiKey = interaction.fields.getTextInputValue('api_key');
     await interaction.deferReply({ ephemeral: true });
 
-    const valid = await validateGoogleAiKey(apiKey);
-    if (!valid) {
-      await interaction.editReply({ content: '❌ Clé Google AI invalide. Vérifie et réessaie.' });
+    const { validateGoogleCloudKey } = await import('../api-keys.js');
+    const result = await validateGoogleCloudKey(apiKey);
+
+    if (!result.generativeAi && !result.youtubeData) {
+      await interaction.editReply({ content: '❌ Clé Google Cloud invalide. Vérifie et réessaie.' });
       return;
     }
+
+    const messages: string[] = ['✅ **Clé Google Cloud validée !**'];
+    if (result.generativeAi) messages.push('- Generative AI (images/vidéos) : ✅');
+    else messages.push('- Generative AI : ❌ Active l\'API sur [Google Cloud Console](https://console.cloud.google.com/apis/library/generativelanguage.googleapis.com)');
+    if (result.youtubeData) messages.push('- YouTube Data API : ✅');
+    else messages.push('- YouTube Data API : ❌ Active l\'API sur [Google Cloud Console](https://console.cloud.google.com/apis/library/youtube.googleapis.com)');
 
     const session = findSessionForUser(globalDb, interaction);
     if (session !== undefined) {
@@ -852,7 +860,10 @@ async function handleModalSubmit(
       saveWizardSession(globalDb, session);
     }
 
-    await advanceToPostiz(interaction, globalDb);
+    await interaction.editReply({ content: messages.join('\n') });
+
+    // Short delay before advancing so user can read the result
+    setTimeout(() => { void advanceToPostiz(interaction, globalDb); }, 2000);
     return;
   }
 
@@ -1489,7 +1500,7 @@ async function handleWizardConfirm(
     }
     const googleKey = (session.data as Record<string, unknown>)['_googleKey'] as string | undefined;
     if (googleKey !== undefined) {
-      storeInstanceSecret(globalDb, instanceId, 'google_ai', googleKey);
+      storeInstanceSecret(globalDb, instanceId, 'google_cloud', googleKey);
     }
 
     // 5. Create instance DB + seed data
@@ -1554,12 +1565,12 @@ async function handleWizardConfirm(
           config = { urls: session.data.rssUrls };
         } else if (sourceType === 'reddit' && session.data.redditSubreddits !== undefined) {
           config = { subreddits: session.data.redditSubreddits };
-        } else if (sourceType === 'youtube_transcript' && session.data.youtubeKeywords !== undefined) {
+        } else if (sourceType === 'youtube' && session.data.youtubeKeywords !== undefined) {
           config = { keywords: session.data.youtubeKeywords, maxResults: 10 };
         } else if (sourceType === 'web_search') {
           config = {};
         }
-        upsertSource(instanceDb, { type: sourceType as 'searxng' | 'rss' | 'youtube_transcript' | 'web_search', enabled: true, config });
+        upsertSource(instanceDb, { type: sourceType as import('../../veille/sources/index.js').SourceType, enabled: true, config });
       }
       // Always ensure SearXNG is enabled
       upsertSource(instanceDb, { type: 'searxng', enabled: true, config: {} });

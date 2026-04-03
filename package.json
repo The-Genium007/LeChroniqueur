@@ -17,7 +17,8 @@
     "typecheck": "tsc --noEmit",
     "db:migrate": "tsx src/core/migrate.ts",
     "reset:onboarding": "tsx scripts/reset-onboarding.ts",
-    "reset:all": "tsx scripts/reset-all.ts"
+    "reset:all": "tsx scripts/reset-all.ts",
+    "cli": "tsx scripts/dev-cli.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

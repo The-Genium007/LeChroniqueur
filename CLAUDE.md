@@ -78,6 +78,23 @@ Validation via Zod dans `src/core/config.ts`.
 - `budget/tracker.ts` — comptage, seuils, alertes
 - `discord/message-builder.ts` — construction embeds + boutons
 
+## CLI Dev (développement uniquement)
+
+Commandes CLI qui exécutent les mêmes pipelines que le bot Discord, sans démarrer Discord.
+Les données sont écrites en DB normalement — les messages Discord sont affichés dans le terminal.
+
+```bash
+npm run cli help                          # Aide
+npm run cli list                          # Lister les instances
+npm run cli -- veille <instanceId>        # Lancer la veille (collecte + prefilter + scoring)
+npm run cli -- suggest <instanceId>       # Générer des suggestions de contenu
+npm run cli -- rapport <instanceId>       # Générer le rapport hebdomadaire
+npm run cli -- inspect <instanceId>       # Afficher articles, scores, sources, catégories
+npm run cli -- search <instanceId> <q>    # Recherche full-text dans la base
+```
+
+Requiert `.env.dev` avec au minimum `MASTER_ENCRYPTION_KEY` et `SEARXNG_URL`.
+
 ## Commandes slash Discord
 
 | Commande | Description |

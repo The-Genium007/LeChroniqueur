@@ -445,6 +445,13 @@ const migrations: readonly Migration[] = [
       )
     `,
   },
+  {
+    name: '027_add_youtube_reddit_metrics',
+    up: `
+      ALTER TABLE metrics ADD COLUMN youtube_quota_units INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE metrics ADD COLUMN reddit_requests INTEGER NOT NULL DEFAULT 0
+    `,
+  },
 ];
 
 export function runMigrations(db: Database): void {

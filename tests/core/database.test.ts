@@ -49,9 +49,9 @@ describe('migrations', () => {
       .prepare('SELECT name FROM _migrations ORDER BY id')
       .all() as Array<{ name: string }>;
 
-    expect(migrations.length).toBe(26);
+    expect(migrations.length).toBe(27);
     expect(migrations[0]?.name).toBe('001_create_veille_articles');
-    expect(migrations[25]?.name).toBe('026_create_instance_profile');
+    expect(migrations[26]?.name).toBe('027_add_youtube_reddit_metrics');
   });
 
   it('should be idempotent — running migrations twice does not fail', () => {
@@ -59,7 +59,7 @@ describe('migrations', () => {
     expect(() => runMigrations(db)).not.toThrow();
 
     const migrations = db.prepare('SELECT COUNT(*) AS count FROM _migrations').get() as { count: number };
-    expect(migrations.count).toBe(26);
+    expect(migrations.count).toBe(27);
   });
 });
 

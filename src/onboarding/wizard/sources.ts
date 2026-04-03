@@ -10,7 +10,6 @@ import {
   ButtonStyle,
 } from '../../discord/component-builder-v2.js';
 import { type WizardSession, getStepLabel } from './state-machine.js';
-import { search as searxngSearch } from '../../services/searxng.js';
 import { complete } from '../../services/anthropic.js';
 import { getLogger } from '../../core/logger.js';
 import { collectFromRss } from '../../veille/sources/rss.js';
@@ -30,8 +29,8 @@ interface SourceDef {
 const SOURCES: readonly SourceDef[] = [
   { id: 'searxng', label: 'SearXNG', emoji: '🔍', description: 'Meta-search web (toujours actif)', alwaysOn: true, hasConfig: false },
   { id: 'rss', label: 'RSS / Atom', emoji: '📰', description: 'Blogs et médias spécialisés', alwaysOn: false, hasConfig: true },
-  { id: 'reddit', label: 'Reddit (via SearXNG)', emoji: '🤖', description: 'Subreddits ciblés', alwaysOn: false, hasConfig: true },
-  { id: 'youtube_transcript', label: 'YouTube Transcripts', emoji: '📺', description: 'Transcriptions vidéo de créateurs', alwaysOn: false, hasConfig: true },
+  { id: 'reddit', label: 'Reddit', emoji: '🤖', description: 'Subreddits ciblés (API native /hot + /rising)', alwaysOn: false, hasConfig: true },
+  { id: 'youtube', label: 'YouTube', emoji: '📺', description: 'YouTube Data API + transcriptions auto', alwaysOn: false, hasConfig: true },
   { id: 'web_search', label: 'LLM Web Search', emoji: '🧠', description: 'Recherche IA contextuelle profonde', alwaysOn: false, hasConfig: false, warningText: '⚠️ Consomme des tokens LLM supplémentaires' },
 ];
 
@@ -180,7 +179,7 @@ async function autoPopulateSources(session: WizardSession): Promise<void> {
   // Check which sources need auto-population
   const needsRss = enabled.has('rss') && (session.data.rssUrls ?? []).length === 0;
   const needsReddit = enabled.has('reddit') && (session.data.redditSubreddits ?? []).length === 0;
-  const needsYoutube = enabled.has('youtube_transcript') && (session.data.youtubeKeywords ?? []).length === 0;
+  const needsYoutube = enabled.has('youtube') && (session.data.youtubeKeywords ?? []).length === 0;
 
   if (!needsRss && !needsReddit && !needsYoutube) return;
 
@@ -276,23 +275,31 @@ export async function miniDryRunSources(session: WizardSession): Promise<V2Messa
     }
   }
 
-  // Test Reddit via SearXNG
+  // Test Reddit via native API
   if (enabled.has('reddit') && (session.data.redditSubreddits ?? []).length > 0) {
     const subs = session.data.redditSubreddits ?? [];
     const firstSub = subs[0];
     if (firstSub !== undefined) {
       try {
-        const searchResults = await searxngSearch(`site:reddit.com/r/${firstSub}`, {
-          engines: ['google'],
-          language: 'fr',
-          timeRange: 'week',
-        });
-        results.push({
-          source: `Reddit (r/${firstSub})`,
-          emoji: '🤖',
-          resultCount: searchResults.length,
-          samples: searchResults.slice(0, 3).map((r) => `► ${r.title.slice(0, 60)}`),
-        });
+        const response = await fetch(
+          `https://old.reddit.com/r/${encodeURIComponent(firstSub)}/hot.json?limit=5&raw_json=1`,
+          {
+            headers: { 'User-Agent': 'LeChroniqueur/1.0 (veille bot; +https://github.com)' },
+            signal: AbortSignal.timeout(15_000),
+          },
+        );
+        if (response.ok) {
+          const listing = await response.json() as { data: { children: Array<{ data: { title: string } }> } };
+          const posts = listing.data.children;
+          results.push({
+            source: `Reddit (r/${firstSub})`,
+            emoji: '🤖',
+            resultCount: posts.length,
+            samples: posts.slice(0, 3).map((p) => `► ${p.data.title.slice(0, 60)}`),
+          });
+        } else {
+          results.push({ source: 'Reddit', emoji: '🤖', resultCount: 0, samples: [`(HTTP ${String(response.status)})`] });
+        }
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         logger.warn({ error: msg }, 'Mini dry-run Reddit failed');
@@ -301,27 +308,40 @@ export async function miniDryRunSources(session: WizardSession): Promise<V2Messa
     }
   }
 
-  // Test YouTube via SearXNG
-  if (enabled.has('youtube_transcript') && (session.data.youtubeKeywords ?? []).length > 0) {
+  // Test YouTube via Data API v3
+  if (enabled.has('youtube') && (session.data.youtubeKeywords ?? []).length > 0) {
     const firstKw = (session.data.youtubeKeywords ?? [])[0];
-    if (firstKw !== undefined) {
+    const apiKey = process.env['GOOGLE_AI_API_KEY'];
+    if (firstKw !== undefined && apiKey !== undefined && apiKey.length > 0) {
       try {
-        const searchResults = await searxngSearch(firstKw, {
-          engines: ['youtube'],
-          language: 'fr',
-          timeRange: 'week',
+        const params = new URLSearchParams({
+          part: 'snippet', q: firstKw, type: 'video', order: 'date',
+          maxResults: '5', relevanceLanguage: 'en', key: apiKey,
         });
-        results.push({
-          source: 'YouTube',
-          emoji: '📺',
-          resultCount: searchResults.length,
-          samples: searchResults.slice(0, 3).map((r) => `► ${r.title.slice(0, 60)}`),
-        });
+        const response = await fetch(
+          `https://www.googleapis.com/youtube/v3/search?${params.toString()}`,
+          { signal: AbortSignal.timeout(15_000) },
+        );
+        if (response.ok) {
+          const data = await response.json() as { items: Array<{ snippet: { title: string } }> };
+          results.push({
+            source: 'YouTube',
+            emoji: '📺',
+            resultCount: data.items.length,
+            samples: data.items.slice(0, 3).map((i) => `► ${i.snippet.title.slice(0, 60)}`),
+          });
+        } else if (response.status === 403) {
+          results.push({ source: 'YouTube', emoji: '📺', resultCount: 0, samples: ['⚠️ API YouTube Data non activée sur ton projet Google Cloud'] });
+        } else {
+          results.push({ source: 'YouTube', emoji: '📺', resultCount: 0, samples: [`(HTTP ${String(response.status)})`] });
+        }
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         logger.warn({ error: msg }, 'Mini dry-run YouTube failed');
         results.push({ source: 'YouTube', emoji: '📺', resultCount: 0, samples: ['(erreur)'] });
       }
+    } else if (apiKey === undefined || apiKey.length === 0) {
+      results.push({ source: 'YouTube', emoji: '📺', resultCount: 0, samples: ['⚠️ Clé Google Cloud non configurée'] });
     }
   }
 

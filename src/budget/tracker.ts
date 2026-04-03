@@ -96,6 +96,20 @@ export function recordSearxngQuery(db: SqliteDatabase, count: number): void {
   `).run(count, todayDateStr());
 }
 
+export function recordYouTubeUsage(db: SqliteDatabase, quotaUnits: number): void {
+  ensureTodayRow(db);
+  db.prepare(`
+    UPDATE metrics SET youtube_quota_units = youtube_quota_units + ? WHERE date = ?
+  `).run(quotaUnits, todayDateStr());
+}
+
+export function recordRedditUsage(db: SqliteDatabase, requestCount: number): void {
+  ensureTodayRow(db);
+  db.prepare(`
+    UPDATE metrics SET reddit_requests = reddit_requests + ? WHERE date = ?
+  `).run(requestCount, todayDateStr());
+}
+
 // ─── Period totals ───
 
 function getMetricsForRange(

@@ -30,31 +30,61 @@ export async function validateAnthropicKey(apiKey: string): Promise<boolean> {
 }
 
 /**
- * Validate a Google AI API key by listing models.
+ * Validate a Google Cloud API key.
+ * Tests both Generative AI (Imagen/Veo) and YouTube Data API v3.
+ * Returns which APIs are accessible with this key.
  */
-export async function validateGoogleAiKey(apiKey: string): Promise<boolean> {
+export async function validateGoogleCloudKey(apiKey: string): Promise<{ generativeAi: boolean; youtubeData: boolean }> {
   const logger = getLogger();
 
+  const results = { generativeAi: false, youtubeData: false };
+
+  // Test Generative AI API
   try {
-    const response = await fetch(
+    const genResponse = await fetch(
       'https://generativelanguage.googleapis.com/v1/models',
       {
         headers: { 'x-goog-api-key': apiKey },
         signal: AbortSignal.timeout(10_000),
       },
     );
-    const valid = response.ok;
-    if (valid) {
-      logger.info('Google AI API key validated successfully');
+    results.generativeAi = genResponse.ok;
+    if (results.generativeAi) {
+      logger.info('Google Cloud key: Generative AI API accessible');
     } else {
-      logger.warn({ status: response.status }, 'Google AI API key validation failed');
+      logger.warn({ status: genResponse.status }, 'Google Cloud key: Generative AI API not accessible');
     }
-    return valid;
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    logger.warn({ error: msg }, 'Google AI API key validation failed');
-    return false;
+    logger.warn({ error: msg }, 'Google Cloud key: Generative AI test failed');
   }
+
+  // Test YouTube Data API v3
+  try {
+    const ytResponse = await fetch(
+      `https://www.googleapis.com/youtube/v3/videos?part=id&id=dQw4w9WgXcQ&key=${apiKey}`,
+      { signal: AbortSignal.timeout(10_000) },
+    );
+    results.youtubeData = ytResponse.ok;
+    if (results.youtubeData) {
+      logger.info('Google Cloud key: YouTube Data API accessible');
+    } else {
+      logger.warn({ status: ytResponse.status }, 'Google Cloud key: YouTube Data API not accessible');
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    logger.warn({ error: msg }, 'Google Cloud key: YouTube Data test failed');
+  }
+
+  return results;
+}
+
+/**
+ * @deprecated Use validateGoogleCloudKey instead
+ */
+export async function validateGoogleAiKey(apiKey: string): Promise<boolean> {
+  const result = await validateGoogleCloudKey(apiKey);
+  return result.generativeAi;
 }
 
 /**
