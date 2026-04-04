@@ -272,22 +272,71 @@ function extractVideoId(url: string): string | undefined {
   return undefined;
 }
 
+// Negative terms that indicate video game / mobile game / marketing — not tabletop RPG
+const NEGATIVE_TERMS = [
+  'gameplay', 'walkthrough', 'playthrough', 'let\'s play',
+  'mobile game', 'mobile rpg', 'android', 'ios',
+  'gift code', 'redeem code', 'promo code', 'coupon',
+  'hack', 'cheat', 'mod apk',
+  'gacha', 'idle rpg', 'auto battler', 'auto-battler',
+  'teen patti', 'roulette', 'casino', 'poker',
+  'indian bike', 'granny',
+  'jrpg', 'arpg', 'action rpg',
+  'unreal engine', 'godot', 'unity', 'rpg maker',
+  'instagram automation', 'manychat', 'désactiver les dm',
+  'disable dm', 'dm me the word', 'dm moi le mot',
+  '#fypシ', '#viral', '#businesstips',
+];
+
+// Strong tabletop-specific terms — if present, always relevant
+const STRONG_TABLETOP_TERMS = [
+  'ttrpg', 'tabletop rpg', 'tabletop role', 'pen and paper',
+  'dnd', 'd&d', 'dungeons and dragons', 'dungeons & dragons',
+  'dungeon master', 'game master tips', 'dm tips', 'gm tips',
+  'pathfinder', 'call of cthulhu', 'world of darkness',
+  'character creation', 'campaign', 'one shot', 'actual play',
+  'critical role', 'dimension 20',
+  'roll20', 'foundry vtt', 'dndbeyond',
+  '#ttrpg', '#dnd5e', '#dungeonsanddragons',
+];
+
 /**
- * Check if a YouTube video title is relevant to at least one category keyword.
- * Filters out noise like "Teen Patti Master", "J.D.R Official" etc.
+ * Check if a YouTube video title is relevant to tabletop RPG content.
+ * Uses a 3-tier filter:
+ * 1. Reject if title contains negative terms (video games, mobile, marketing)
+ * 2. Accept if title contains strong tabletop terms
+ * 3. For generic "rpg" matches, require additional tabletop context
  */
 function isRelevantTitle(title: string, categories: readonly VeilleCategory[]): boolean {
   const lower = title.toLowerCase();
-  // Common RPG terms that indicate relevance even without exact keyword match
-  const rpgTerms = ['rpg', 'dnd', 'd&d', 'tabletop', 'ttrpg', 'dungeon', 'dragon', 'game master', 'dm ', 'gm '];
-  for (const term of rpgTerms) {
+
+  // Tier 1: Reject if contains negative terms
+  for (const neg of NEGATIVE_TERMS) {
+    if (lower.includes(neg)) return false;
+  }
+
+  // Tier 2: Accept if contains strong tabletop terms
+  for (const term of STRONG_TABLETOP_TERMS) {
     if (lower.includes(term)) return true;
   }
+
+  // Tier 3: Check category keywords (EN only)
   for (const cat of categories) {
     for (const kw of cat.keywords.en) {
       if (lower.includes(kw.toLowerCase())) return true;
     }
   }
+
+  // "rpg" alone is too generic — only accept if combined with tabletop indicators
+  if (lower.includes('rpg')) {
+    const tabletopIndicators = ['table', 'dice', 'session', 'player', 'character', 'quest', 'adventure', 'rules', 'system', 'setting'];
+    for (const ind of tabletopIndicators) {
+      if (lower.includes(ind)) return true;
+    }
+    // Bare "rpg" without tabletop context → reject
+    return false;
+  }
+
   return false;
 }
 

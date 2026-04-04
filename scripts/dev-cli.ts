@@ -50,17 +50,26 @@ import type { InstanceProfile } from '../src/core/instance-profile.js';
 // ─── Stub TextChannel ───
 // A fake Discord TextChannel that logs to terminal instead of sending to Discord.
 
+function createStubMessage(channelName: string) {
+  return {
+    id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    startThread: async (opts: { name: string }) => createStubChannel(`${channelName}/${opts.name}`),
+    delete: async () => {},
+    edit: async () => {},
+  };
+}
+
 function createStubChannel(name: string): import('discord.js').TextChannel {
+  const sentMessages = new Map<string, ReturnType<typeof createStubMessage>>();
+
   const stub = {
     id: `stub-${name}`,
     name,
     isTextBased: () => true,
     send: async (options: unknown) => {
-      // Extract text from V2 components
       const text = extractTextFromPayload(options);
       if (text.length > 0) {
         console.log(`\n📨 #${name}:`);
-        // Truncate long messages for terminal readability
         const lines = text.split('\n').slice(0, 20);
         for (const line of lines) {
           console.log(`  ${line}`);
@@ -69,11 +78,18 @@ function createStubChannel(name: string): import('discord.js').TextChannel {
           console.log(`  ... (${String(text.split('\n').length - 20)} more lines)`);
         }
       }
-      return { id: `msg-${Date.now()}`, startThread: async (opts: { name: string }) => createStubChannel(`thread-${opts.name}`) };
+      const msg = createStubMessage(name);
+      sentMessages.set(msg.id, msg);
+      return msg;
     },
-    messages: { fetch: async () => new Map() },
-    threads: { create: async (opts: { name: string }) => createStubChannel(`thread-${opts.name}`) },
-    startThread: async (opts: { name: string }) => createStubChannel(`thread-${opts.name}`),
+    messages: {
+      fetch: async (id: string) => {
+        // Return previously sent message or a fresh stub
+        return sentMessages.get(id) ?? createStubMessage(name);
+      },
+    },
+    threads: { create: async (opts: { name: string }) => createStubChannel(`${name}/${opts.name}`) },
+    startThread: async (opts: { name: string }) => createStubChannel(`${name}/${opts.name}`),
   };
   return stub as unknown as import('discord.js').TextChannel;
 }

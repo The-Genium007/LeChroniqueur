@@ -128,12 +128,19 @@ async function runVeillePipeline(
   let totalTokensOut = 0;
 
   let consecutiveRateLimits = 0;
+  const MAX_RETRIES = 4;
+  const CIRCUIT_BREAKER_LIMIT = 5;
+  const COOLDOWN_BETWEEN_BATCHES_MS = 30_000; // 30s between successful batches to avoid rate limits
 
   for (let i = 0; i < filtered.length; i += BATCH_SIZE) {
-    // If we hit 3 consecutive rate-limited batches, stop — the quota is exhausted
-    if (consecutiveRateLimits >= 3) {
-      logger.warn({ remainingBatches: Math.ceil((filtered.length - i) / BATCH_SIZE) }, 'Stopping analysis — API rate limit persists after 3 consecutive failures');
+    if (consecutiveRateLimits >= CIRCUIT_BREAKER_LIMIT) {
+      logger.warn({ remainingBatches: Math.ceil((filtered.length - i) / BATCH_SIZE) }, 'Stopping analysis — API rate limit persists');
       break;
+    }
+
+    // Cooldown between batches to stay under rate limits
+    if (i > 0 && allAnalyzed.length > 0) {
+      await new Promise<void>((resolve) => { setTimeout(resolve, COOLDOWN_BETWEEN_BATCHES_MS); });
     }
 
     const batch = filtered.slice(i, i + BATCH_SIZE);
@@ -141,9 +148,8 @@ async function runVeillePipeline(
     const totalBatches = Math.ceil(filtered.length / BATCH_SIZE);
     logger.info({ batch: batchNum, total: totalBatches, articles: batch.length }, 'Analyzing batch');
 
-    // Retry with exponential backoff for rate limits (429)
     let success = false;
-    for (let attempt = 0; attempt < 3 && !success; attempt++) {
+    for (let attempt = 0; attempt < MAX_RETRIES && !success; attempt++) {
       try {
         const { articles: batchAnalyzed, tokensUsed } = await analyze(batch, preferences, persona, profile);
         allAnalyzed.push(...batchAnalyzed);
@@ -155,8 +161,8 @@ async function runVeillePipeline(
       } catch (batchError) {
         const msg = batchError instanceof Error ? batchError.message : String(batchError);
         const isRateLimit = msg.includes('429') || msg.includes('rate_limit');
-        if (isRateLimit && attempt < 2) {
-          const waitMs = (attempt + 1) * 60_000; // 60s, 120s
+        if (isRateLimit && attempt < MAX_RETRIES - 1) {
+          const waitMs = (attempt + 1) * 60_000; // 60s, 120s, 180s
           logger.warn({ batch: batchNum, attempt: attempt + 1, waitMs }, 'Rate limited, waiting before retry');
           await new Promise<void>((resolve) => { setTimeout(resolve, waitMs); });
         } else {
