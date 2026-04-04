@@ -228,8 +228,22 @@ export async function handleWizardInteraction(
 
     const session = createWizardSession(globalDb, guildId, interaction.user.id);
     saveWizardSession(globalDb, session);
-    const providerPayload = buildProviderSelection(session);
-    await dmSplit(interaction.user, providerPayload, session);
+    // Step 1: Gemini key (obligatoire) — show modal directly
+    const geminiPrompt = v2([buildContainer(getColor('primary'), (c) => {
+      c.addTextDisplayComponents(txt([
+        '## 🔑 Clé Gemini (obligatoire)',
+        '',
+        'Pour générer des images et vidéos, une clé **Google AI Studio** (Gemini) est requise.',
+        'Crée-en une sur [Google AI Studio](https://aistudio.google.com/apikey).',
+        '',
+        'Tu pourras aussi l\'utiliser comme provider LLM pour l\'analyse de texte.',
+      ].join('\n')));
+      c.addSeparatorComponents(sep());
+      c.addActionRowComponents(row(
+        btn('onboard:gemini:enter', 'Entrer ma clé Gemini', ButtonStyle.Primary, '🔑'),
+      ));
+    })]);
+    await dmSplit(interaction.user, geminiPrompt, session);
     saveWizardSession(globalDb, session);
     try { await interaction.editReply({ content: '📩 Check tes DMs !' }); } catch { /* expired */ }
     return;
@@ -251,12 +265,76 @@ export async function handleWizardInteraction(
     const session = createWizardSession(globalDb, guildId, interaction.user.id);
     (session.data as Record<string, unknown>)['_importMode'] = true;
     saveWizardSession(globalDb, session);
-    // Start with LLM provider selection same as normal
+    // Import mode also starts with Gemini key
     await interaction.deferReply({ ephemeral: true });
-    const importProviderPayload = buildProviderSelection(session);
-    await dmSplit(interaction.user, importProviderPayload, session);
+    const importGeminiPrompt = v2([buildContainer(getColor('primary'), (c) => {
+      c.addTextDisplayComponents(txt([
+        '## 🔑 Clé Gemini (obligatoire)',
+        '',
+        'Avant d\'importer, entre ta clé Google AI Studio (Gemini).',
+      ].join('\n')));
+      c.addSeparatorComponents(sep());
+      c.addActionRowComponents(row(
+        btn('onboard:gemini:enter', 'Entrer ma clé Gemini', ButtonStyle.Primary, '🔑'),
+      ));
+    })]);
+    await dmSplit(interaction.user, importGeminiPrompt, session);
     saveWizardSession(globalDb, session);
     try { await interaction.editReply({ content: '📩 Check tes DMs !' }); } catch { /* expired */ }
+    return;
+  }
+
+  // ─── Gemini key flow ───
+  if (customId === 'onboard:gemini:enter') {
+    const modal = new ModalBuilder()
+      .setCustomId('wizard:modal:gemini')
+      .setTitle('Clé Gemini (Google AI Studio)')
+      .addComponents(
+        new ActionRowBuilder<TextInputBuilder>().addComponents(
+          new TextInputBuilder()
+            .setCustomId('gemini_key')
+            .setLabel('Clé API Gemini (AIza...)')
+            .setStyle(TextInputStyle.Short)
+            .setPlaceholder('AIza...')
+            .setRequired(true),
+        ),
+      );
+    await interaction.showModal(modal);
+    return;
+  }
+
+  if (customId === 'onboard:gemini:llm:yes') {
+    // User wants Gemini as LLM too — set provider + reuse Gemini key as LLM key
+    const session = findSessionForUser(globalDb, interaction);
+    if (session === undefined) return;
+    setLlmProvider(session, 'google');
+    session.data.llmProvider = 'google';
+    // Reuse the Gemini key as LLM key
+    const geminiKey = (session.data as Record<string, unknown>)['_geminiKey'] as string | undefined;
+    if (geminiKey !== undefined) {
+      setLlmApiKey(session, geminiKey);
+      (session.data as Record<string, unknown>)['_anthropicKey'] = geminiKey;
+      process.env['ANTHROPIC_API_KEY'] = geminiKey;
+    }
+    saveWizardSession(globalDb, session);
+    // Show model selection for Gemini
+    const payload = buildModelSelection(session);
+    await interaction.deferReply({ ephemeral: true });
+    await dmSplit(interaction.user, payload, session);
+    saveWizardSession(globalDb, session);
+    try { await interaction.editReply({ content: '✅' }); interaction.deleteReply().catch(() => {}); } catch { /* expired */ }
+    return;
+  }
+
+  if (customId === 'onboard:gemini:llm:no') {
+    // User wants a separate LLM provider — show provider selection
+    const session = findSessionForUser(globalDb, interaction);
+    if (session === undefined) return;
+    const payload = buildProviderSelection(session);
+    await interaction.deferReply({ ephemeral: true });
+    await dmSplit(interaction.user, payload, session);
+    saveWizardSession(globalDb, session);
+    try { await interaction.editReply({ content: '✅' }); interaction.deleteReply().catch(() => {}); } catch { /* expired */ }
     return;
   }
 
@@ -714,9 +792,23 @@ export async function handleWizardInteraction(
     await interaction.showModal(modal);
 
   } else if (customId === 'wizard:llm:next') {
-    // Model selected → show API key modal
-    const modal = buildApiKeyModal(session);
-    await interaction.showModal(modal);
+    // Model selected → if Gemini key already provided (Gemini-as-LLM), skip API key modal
+    const existingKey = (session.data as Record<string, unknown>)['_anthropicKey'] as string | undefined;
+    if (existingKey !== undefined && existingKey.length > 0 && session.data.llmProvider === 'google') {
+      // Gemini key already set — show validation result directly
+      const provider = getLlmProvider(session.data.llmProvider);
+      const payload = buildValidationResult(true, provider?.name ?? 'Gemini', session.data.llmModel ?? '');
+      try { await interaction.message.delete(); } catch { /* already deleted */ }
+      await dmSplit(interaction.user, payload, session);
+      saveWizardSession(globalDb, session);
+      if (!interaction.replied && !interaction.deferred) {
+        try { await interaction.deferUpdate(); } catch { /* expired */ }
+      }
+    } else {
+      // Normal flow — show API key modal
+      const modal = buildApiKeyModal(session);
+      await interaction.showModal(modal);
+    }
 
   } else if (customId === 'wizard:llm:retry') {
     // Retry API key entry
@@ -734,13 +826,13 @@ export async function handleWizardInteraction(
     }
 
   } else if (customId === 'wizard:llm:confirmed') {
-    // LLM confirmed → ask for Google Cloud key (images/videos + YouTube Data)
+    // LLM confirmed → ask for Google Cloud key (YouTube Data API, optionnel)
     if (!interaction.replied && !interaction.deferred) {
       await interaction.deferReply({ ephemeral: true });
     }
     try { await interaction.message.delete(); } catch { /* already deleted */ }
     await interaction.editReply({
-      content: '✅ **Provider IA configuré !**\n\nMaintenant, la clé Google Cloud (optionnel — images, vidéos et YouTube Data).\nCrée une clé sur [Google Cloud Console](https://console.cloud.google.com/apis/credentials) avec les APIs **Generative Language** et **YouTube Data v3** activées.',
+      content: '✅ **Provider LLM configuré !**\n\nClé Google Cloud (optionnel — pour YouTube Data API).\nCrée une clé sur [Google Cloud Console](https://console.cloud.google.com/apis/credentials) avec l\'API **YouTube Data v3** activée.',
       components: [row(
         btn('onboard:key:google', 'Entrer clé Google Cloud', ButtonStyle.Primary, '🔑'),
         btn('onboard:skip:google', 'Plus tard', ButtonStyle.Secondary, '⏭️'),
@@ -755,12 +847,12 @@ export async function handleWizardInteraction(
 function buildGoogleKeyModal(): ModalBuilder {
   return new ModalBuilder()
     .setCustomId('wizard:modal:google')
-    .setTitle('Clé Google Cloud')
+    .setTitle('Clé Google Cloud (YouTube Data)')
     .addComponents(
       new ActionRowBuilder<TextInputBuilder>().addComponents(
         new TextInputBuilder()
           .setCustomId('api_key')
-          .setLabel('Clé API Google Cloud (AIza...)')
+          .setLabel('Clé Google Cloud Console (AIza...)')
           .setStyle(TextInputStyle.Short)
           .setPlaceholder('AIza...')
           .setRequired(true),
@@ -825,9 +917,9 @@ async function handleModalSubmit(
       saveWizardSession(globalDb, session);
     }
 
-    // Ask for Google Cloud key — use plain content + ActionRow (ephemeral doesn't support V2 containers)
+    // Ask for Google Cloud key (YouTube Data, optionnel)
     await interaction.editReply({
-      content: '✅ **Clé Anthropic validée !**\n\nMaintenant, la clé Google Cloud (optionnel — images, vidéos et YouTube Data).\nCrée une clé sur [Google Cloud Console](https://console.cloud.google.com/apis/credentials) avec les APIs **Generative Language** et **YouTube Data v3** activées.',
+      content: '✅ **Clé Anthropic validée !**\n\nClé Google Cloud (optionnel — pour YouTube Data API).\nCrée une clé sur [Google Cloud Console](https://console.cloud.google.com/apis/credentials) avec l\'API **YouTube Data v3** activée.',
       components: [row(
         btn('onboard:key:google', 'Entrer clé Google Cloud', ButtonStyle.Primary, '🔑'),
         btn('onboard:skip:google', 'Plus tard', ButtonStyle.Secondary, '⏭️'),
@@ -836,34 +928,77 @@ async function handleModalSubmit(
     return;
   }
 
+  // Gemini key modal — step 1 (obligatoire)
+  if (customId === 'wizard:modal:gemini') {
+    const apiKey = interaction.fields.getTextInputValue('gemini_key');
+    await interaction.deferReply({ ephemeral: true });
+
+    const { validateGeminiKey } = await import('../api-keys.js');
+    const valid = await validateGeminiKey(apiKey);
+
+    if (!valid) {
+      await interaction.editReply({ content: '❌ Clé Gemini invalide. Vérifie sur [Google AI Studio](https://aistudio.google.com/apikey) et réessaie.' });
+      return;
+    }
+
+    const session = findSessionForUser(globalDb, interaction);
+    if (session !== undefined) {
+      (session.data as Record<string, unknown>)['_geminiKey'] = apiKey;
+      // Also make Gemini key available immediately for LLM calls during onboarding
+      process.env['GEMINI_API_KEY'] = apiKey;
+      saveWizardSession(globalDb, session);
+    }
+
+    // Ask: use Gemini as LLM too?
+    const choicePayload = v2([buildContainer(getColor('success'), (c) => {
+      c.addTextDisplayComponents(txt([
+        '## ✅ Clé Gemini validée !',
+        '',
+        'Images (Imagen) et vidéos (Veo) sont configurées.',
+        '',
+        '**Veux-tu aussi utiliser Gemini comme provider LLM** pour l\'analyse de texte, le scoring et les suggestions ?',
+        '',
+        '> *Si non, tu pourras choisir un autre provider (Anthropic, OpenAI, Mistral, etc.)*',
+      ].join('\n')));
+      c.addSeparatorComponents(sep());
+      c.addActionRowComponents(row(
+        btn('onboard:gemini:llm:yes', 'Oui, utiliser Gemini pour tout', ButtonStyle.Success, '✅'),
+        btn('onboard:gemini:llm:no', 'Non, choisir un autre provider', ButtonStyle.Secondary, '🔄'),
+      ));
+    })]);
+
+    if (session !== undefined) {
+      await dmSplit(interaction.user, choicePayload, session);
+      saveWizardSession(globalDb, session);
+    } else {
+      await sendSplit(interaction.user, choicePayload);
+    }
+    try { await interaction.editReply({ content: '✅ Clé Gemini validée.' }); interaction.deleteReply().catch(() => {}); } catch { /* expired */ }
+    return;
+  }
+
+  // Google Cloud key modal — step 3 (optionnel, YouTube Data only)
   if (customId === 'wizard:modal:google') {
     const apiKey = interaction.fields.getTextInputValue('api_key');
     await interaction.deferReply({ ephemeral: true });
 
     const { validateGoogleCloudKey } = await import('../api-keys.js');
-    const result = await validateGoogleCloudKey(apiKey);
+    const valid = await validateGoogleCloudKey(apiKey);
 
-    if (!result.generativeAi && !result.youtubeData) {
-      await interaction.editReply({ content: '❌ Clé Google Cloud invalide. Vérifie et réessaie.' });
+    if (!valid) {
+      await interaction.editReply({ content: '❌ Clé Google Cloud invalide ou API YouTube Data non activée.\nActive-la sur [Google Cloud Console](https://console.cloud.google.com/apis/library/youtube.googleapis.com).' });
       return;
     }
 
-    const messages: string[] = ['✅ **Clé Google Cloud validée !**'];
-    if (result.generativeAi) messages.push('- Generative AI (images/vidéos) : ✅');
-    else messages.push('- Generative AI : ❌ Active l\'API sur [Google Cloud Console](https://console.cloud.google.com/apis/library/generativelanguage.googleapis.com)');
-    if (result.youtubeData) messages.push('- YouTube Data API : ✅');
-    else messages.push('- YouTube Data API : ❌ Active l\'API sur [Google Cloud Console](https://console.cloud.google.com/apis/library/youtube.googleapis.com)');
-
     const session = findSessionForUser(globalDb, interaction);
     if (session !== undefined) {
-      (session.data as Record<string, unknown>)['_googleKey'] = apiKey;
+      (session.data as Record<string, unknown>)['_googleCloudKey'] = apiKey;
+      process.env['GOOGLE_CLOUD_API_KEY'] = apiKey;
       saveWizardSession(globalDb, session);
     }
 
-    await interaction.editReply({ content: messages.join('\n') });
-
-    // Short delay before advancing so user can read the result
-    setTimeout(() => { void advanceToPostiz(interaction, globalDb); }, 2000);
+    await interaction.editReply({ content: '✅ YouTube Data API configuré !' });
+    setTimeout(() => { void advanceToPostiz(interaction, globalDb); }, 1500);
     return;
   }
 
@@ -1498,9 +1633,13 @@ async function handleWizardConfirm(
       storeInstanceSecret(globalDb, instanceId, 'anthropic', llmKey);
       storeInstanceSecret(globalDb, instanceId, 'llm', llmKey);
     }
-    const googleKey = (session.data as Record<string, unknown>)['_googleKey'] as string | undefined;
-    if (googleKey !== undefined) {
-      storeInstanceSecret(globalDb, instanceId, 'google_cloud', googleKey);
+    const geminiKey = (session.data as Record<string, unknown>)['_geminiKey'] as string | undefined;
+    if (geminiKey !== undefined) {
+      storeInstanceSecret(globalDb, instanceId, 'gemini', geminiKey);
+    }
+    const googleCloudKey = (session.data as Record<string, unknown>)['_googleCloudKey'] as string | undefined;
+    if (googleCloudKey !== undefined) {
+      storeInstanceSecret(globalDb, instanceId, 'google_cloud', googleCloudKey);
     }
 
     // 5. Create instance DB + seed data

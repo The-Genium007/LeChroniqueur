@@ -141,7 +141,8 @@ function buildCliContext(instanceId: string): InstanceContext {
   const instanceSecrets: InstanceSecrets = {
     anthropicApiKey: secrets['llm'] ?? secrets['anthropic'] ?? '',
     anthropicModel: secrets['anthropic_model'] ?? 'claude-sonnet-4-20250514',
-    googleAiApiKey: secrets['google_cloud'],
+    geminiApiKey: secrets['gemini'] ?? '',
+    googleCloudApiKey: secrets['google_cloud'],
     postizApiUrl: secrets['postiz_url'],
     postizApiKey: secrets['postiz_api_key'],
   };
@@ -150,8 +151,11 @@ function buildCliContext(instanceId: string): InstanceContext {
   if (instanceSecrets.anthropicApiKey.length > 0) {
     process.env['ANTHROPIC_API_KEY'] = instanceSecrets.anthropicApiKey;
   }
-  if (instanceSecrets.googleAiApiKey !== undefined && instanceSecrets.googleAiApiKey.length > 0) {
-    process.env['GOOGLE_AI_API_KEY'] = instanceSecrets.googleAiApiKey;
+  if (instanceSecrets.geminiApiKey.length > 0) {
+    process.env['GEMINI_API_KEY'] = instanceSecrets.geminiApiKey;
+  }
+  if (instanceSecrets.googleCloudApiKey !== undefined && instanceSecrets.googleCloudApiKey.length > 0) {
+    process.env['GOOGLE_CLOUD_API_KEY'] = instanceSecrets.googleCloudApiKey;
   }
 
   // Load persona, categories, profile

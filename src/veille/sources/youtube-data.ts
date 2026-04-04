@@ -76,7 +76,7 @@ export async function collectFromYouTubeData(
   db: SqliteDatabase,
 ): Promise<readonly RawArticle[]> {
   const logger = getLogger();
-  const apiKey = process.env['GOOGLE_AI_API_KEY'];
+  const apiKey = process.env['GOOGLE_CLOUD_API_KEY'];
 
   if (apiKey === undefined || apiKey.length === 0) {
     logger.warn('YouTube Data collector: no Google Cloud API key configured');

@@ -97,8 +97,11 @@ async function main(): Promise<void> {
     if (ctx.secrets.anthropicApiKey.length > 0) {
       process.env['ANTHROPIC_API_KEY'] = ctx.secrets.anthropicApiKey;
     }
-    if (ctx.secrets.googleAiApiKey !== undefined && ctx.secrets.googleAiApiKey.length > 0) {
-      process.env['GOOGLE_AI_API_KEY'] = ctx.secrets.googleAiApiKey;
+    if (ctx.secrets.geminiApiKey.length > 0) {
+      process.env['GEMINI_API_KEY'] = ctx.secrets.geminiApiKey;
+    }
+    if (ctx.secrets.googleCloudApiKey !== undefined && ctx.secrets.googleCloudApiKey.length > 0) {
+      process.env['GOOGLE_CLOUD_API_KEY'] = ctx.secrets.googleCloudApiKey;
     }
 
     try {
@@ -713,8 +716,11 @@ async function main(): Promise<void> {
           const newSession = createWizardSession(globalDb, ctx.guildId, interaction.user.id);
           // Copy API keys from current instance's secrets
           (newSession.data as Record<string, unknown>)['_anthropicKey'] = ctx.secrets.anthropicApiKey;
-          if (ctx.secrets.googleAiApiKey !== undefined) {
-            (newSession.data as Record<string, unknown>)['_googleKey'] = ctx.secrets.googleAiApiKey;
+          if (ctx.secrets.geminiApiKey.length > 0) {
+            (newSession.data as Record<string, unknown>)['_geminiKey'] = ctx.secrets.geminiApiKey;
+          }
+          if (ctx.secrets.googleCloudApiKey !== undefined) {
+            (newSession.data as Record<string, unknown>)['_googleCloudKey'] = ctx.secrets.googleCloudApiKey;
           }
           saveWizardSession(globalDb, newSession);
           // Skip directly to Postiz setup since keys are pre-filled

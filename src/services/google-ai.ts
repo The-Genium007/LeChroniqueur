@@ -43,7 +43,7 @@ function getClient(): GoogleGenAI {
 
   const config = getConfig();
 
-  const envKey = process.env['GOOGLE_AI_API_KEY'] ?? config.GOOGLE_AI_API_KEY;
+  const envKey = process.env['GEMINI_API_KEY'] ?? process.env['GOOGLE_AI_API_KEY'] ?? config.GOOGLE_AI_API_KEY;
 
   if (envKey.length === 0) {
     throw new ApiNotConfiguredError('google');

@@ -23,7 +23,8 @@ export const ALL_CHANNEL_TYPES: readonly ChannelType[] = [
 export interface InstanceSecrets {
   readonly anthropicApiKey: string;
   readonly anthropicModel: string;
-  readonly googleAiApiKey?: string | undefined;
+  readonly geminiApiKey: string;
+  readonly googleCloudApiKey?: string | undefined;
   readonly postizApiUrl?: string | undefined;
   readonly postizApiKey?: string | undefined;
 }

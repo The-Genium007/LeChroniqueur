@@ -311,7 +311,7 @@ export async function miniDryRunSources(session: WizardSession): Promise<V2Messa
   // Test YouTube via Data API v3
   if (enabled.has('youtube') && (session.data.youtubeKeywords ?? []).length > 0) {
     const firstKw = (session.data.youtubeKeywords ?? [])[0];
-    const apiKey = process.env['GOOGLE_AI_API_KEY'];
+    const apiKey = process.env['GOOGLE_CLOUD_API_KEY'];
     if (firstKw !== undefined && apiKey !== undefined && apiKey.length > 0) {
       try {
         const params = new URLSearchParams({
