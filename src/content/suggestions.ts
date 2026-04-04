@@ -134,6 +134,7 @@ export async function generateSuggestions(
   const response = await complete(persona, userMessage, {
     maxTokens: 4096,
     temperature: 0.8,
+    task: 'suggestions',
   });
 
   let parsed: z.infer<typeof suggestionsResponseSchema>;

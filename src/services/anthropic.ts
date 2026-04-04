@@ -12,6 +12,7 @@ export interface AnthropicResponse {
 export interface CompletionOptions {
   readonly maxTokens?: number | undefined;
   readonly temperature?: number | undefined;
+  readonly task?: import('./llm-factory.js').LlmTask | undefined;
 }
 
 let _client: Anthropic | undefined;
@@ -48,6 +49,22 @@ export async function complete(
     const { mockCompleteResponse } = await import('../dev/fixtures.js');
     logger.debug('MOCK Anthropic complete');
     return { text: mockCompleteResponse(userMessage), tokensIn: 500, tokensOut: 200 };
+  }
+
+  // Smart routing: if a task is specified and llm-factory is initialized, delegate to it
+  if (options?.task !== undefined) {
+    try {
+      const { complete: factoryComplete, getLlmConfig } = await import('./llm-factory.js');
+      if (getLlmConfig() !== undefined) {
+        const factoryOpts: import('./llm-factory.js').LlmCompletionOptions = { task: options.task };
+        if (options.maxTokens !== undefined) (factoryOpts as Record<string, unknown>)['maxTokens'] = options.maxTokens;
+        if (options.temperature !== undefined) (factoryOpts as Record<string, unknown>)['temperature'] = options.temperature;
+        const result = await factoryComplete(systemPrompt, userMessage, factoryOpts);
+        return { text: result.text, tokensIn: result.tokensIn, tokensOut: result.tokensOut };
+      }
+    } catch {
+      // Factory not initialized — fall through to direct Anthropic call
+    }
   }
 
   const client = getClient();

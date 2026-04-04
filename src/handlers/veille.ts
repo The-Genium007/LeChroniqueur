@@ -103,8 +103,8 @@ async function runVeillePipeline(
 
   recordSearxngQuery(db, totalFetched);
 
-  // Pre-filter: URL patterns, content quality, near-dedup, DB dedup
-  const filterResult = prefilter(rawArticles, profile, db);
+  // Pre-filter: URL patterns, content quality, near-dedup, DB dedup, title relevance
+  const filterResult = prefilter(rawArticles, profile, db, categories);
   const filtered = [...filterResult.passed];
 
   logger.info({
@@ -130,7 +130,7 @@ async function runVeillePipeline(
   let consecutiveRateLimits = 0;
   const MAX_RETRIES = 4;
   const CIRCUIT_BREAKER_LIMIT = 5;
-  const COOLDOWN_BETWEEN_BATCHES_MS = 30_000; // 30s between successful batches to avoid rate limits
+  const COOLDOWN_BETWEEN_BATCHES_MS = 65_000; // 65s between batches — guarantees 1-min rate limit window resets
 
   for (let i = 0; i < filtered.length; i += BATCH_SIZE) {
     if (consecutiveRateLimits >= CIRCUIT_BREAKER_LIMIT) {

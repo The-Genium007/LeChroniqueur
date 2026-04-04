@@ -177,6 +177,7 @@ export async function analyze(
   const response = await complete(systemPrompt, userMessage, {
     maxTokens: 8192,
     temperature: 0.3,
+    task: 'scoring',
   });
 
   // Parse the JSON response — validate per-article (not all-or-nothing)

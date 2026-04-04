@@ -212,10 +212,8 @@ export async function generatePersonaSection(
   const label = SECTION_LABELS[section];
 
   return v2([buildContainer(getColor('primary'), (c) => {
-    // Truncate for display if too long
-    const preview = response.text.length > 1500
-      ? response.text.slice(0, 1500) + '\n\n*(...tronqué pour l\'affichage)*'
-      : response.text;
+    // Full content — dmSplit() handles splitting across messages
+    const preview = response.text;
 
     c.addTextDisplayComponents(txt([
       `## ${label} — Étape ${getStepLabel(session.step)}`,
@@ -297,6 +295,11 @@ export async function modifyPersonaSection(
 /**
  * Assemble the full persona from all sections.
  */
+const NO_EMOJI_RULE = `
+RÈGLE IMPORTANTE : N'utilise JAMAIS d'emojis dans tes posts, légendes, scripts ou tout contenu publié,
+sauf si l'utilisateur te le demande explicitement. Les emojis ne sont autorisés que dans les messages internes (logs, notifications).
+`.trim();
+
 export function assemblePersona(session: WizardSession): string {
   const sections = [
     session.data.personaIdentity,
@@ -304,6 +307,7 @@ export function assemblePersona(session: WizardSession): string {
     session.data.personaVocabulary,
     session.data.personaArtDirection,
     session.data.personaExamples,
+    NO_EMOJI_RULE,
   ].filter((s): s is string => s !== undefined && s.length > 0);
 
   const full = sections.join('\n\n---\n\n');

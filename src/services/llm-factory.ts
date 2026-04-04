@@ -15,9 +15,76 @@ export interface LlmResponse {
   readonly model: string;
 }
 
+export type LlmTask = 'onboarding' | 'scraping' | 'scoring' | 'suggestions' | 'scripts' | 'persona';
+
 export interface LlmCompletionOptions {
   readonly maxTokens?: number;
   readonly temperature?: number;
+  readonly task?: LlmTask;
+}
+
+// ─── Smart Model Routing ───
+// The user never picks a model — the bot selects the optimal one per task.
+// "heavy" = most intelligent (onboarding), "medium" = balanced, "light" = cheapest (scoring volume)
+
+type ModelTier = 'heavy' | 'medium' | 'light';
+
+const TASK_TIERS: Record<LlmTask, ModelTier> = {
+  onboarding: 'heavy',
+  scraping: 'medium',
+  scoring: 'light',
+  suggestions: 'medium',
+  scripts: 'medium',
+  persona: 'medium',
+};
+
+const MODEL_ROUTING: Record<string, Record<ModelTier, string>> = {
+  anthropic: {
+    heavy: 'claude-opus-4-6',
+    medium: 'claude-sonnet-4-6',
+    light: 'claude-haiku-4-5-20251001',
+  },
+  google: {
+    heavy: 'gemini-2.5-pro',
+    medium: 'gemini-2.5-pro',
+    light: 'gemini-2.5-flash',
+  },
+  openai: {
+    heavy: 'gpt-5.4',
+    medium: 'gpt-5.2',
+    light: 'gpt-5-nano',
+  },
+  mistral: {
+    heavy: 'mistral-large-latest',
+    medium: 'mistral-medium-latest',
+    light: 'mistral-small-latest',
+  },
+  deepseek: {
+    heavy: 'deepseek-chat',
+    medium: 'deepseek-chat',
+    light: 'deepseek-chat',
+  },
+  xai: {
+    heavy: 'grok-3',
+    medium: 'grok-3-mini',
+    light: 'grok-3-mini',
+  },
+  groq: {
+    heavy: 'llama-3.3-70b-versatile',
+    medium: 'llama-3.3-70b-versatile',
+    light: 'llama-3.1-8b-instant',
+  },
+};
+
+/**
+ * Get the optimal model for a given task and provider.
+ * Falls back to the configured model if provider not in routing table.
+ */
+export function getModelForTask(providerId: string, task: LlmTask): string | undefined {
+  const tier = TASK_TIERS[task];
+  const providerModels = MODEL_ROUTING[providerId];
+  if (providerModels === undefined) return undefined;
+  return providerModels[tier];
 }
 
 // ─── Singleton state ───
@@ -135,13 +202,22 @@ export async function complete(
     throw new ApiNotConfiguredError('llm');
   }
 
-  switch (_providerConfig.clientType) {
+  // Smart model routing: override model based on task if provided
+  const taskModel = options?.task !== undefined
+    ? getModelForTask(_providerConfig.provider, options.task)
+    : undefined;
+  const effectiveModel = taskModel ?? _providerConfig.model;
+  const effectiveConfig = taskModel !== undefined
+    ? { ..._providerConfig, model: effectiveModel }
+    : _providerConfig;
+
+  switch (effectiveConfig.clientType) {
     case 'anthropic':
-      return completeViaAnthropic(systemPrompt, userMessage, options);
+      return completeViaAnthropic(systemPrompt, userMessage, options, effectiveConfig);
 
     case 'openai':
     case 'openai_compatible':
-      return completeViaOpenAi(systemPrompt, userMessage, options);
+      return completeViaOpenAi(systemPrompt, userMessage, options, effectiveConfig);
   }
 }
 
@@ -151,10 +227,11 @@ async function completeViaAnthropic(
   systemPrompt: string,
   userMessage: string,
   options?: LlmCompletionOptions,
+  configOverride?: LlmProviderConfig,
 ): Promise<LlmResponse> {
   const logger = getLogger();
   const client = getAnthropicClient();
-  const model = _providerConfig?.model ?? 'claude-sonnet-4-6';
+  const model = configOverride?.model ?? _providerConfig?.model ?? 'claude-sonnet-4-6';
 
   logger.debug({ model, systemLength: systemPrompt.length }, 'LLM call (Anthropic)');
 
@@ -206,11 +283,12 @@ async function completeViaOpenAi(
   systemPrompt: string,
   userMessage: string,
   options?: LlmCompletionOptions,
+  configOverride?: LlmProviderConfig,
 ): Promise<LlmResponse> {
   const logger = getLogger();
   const client = getOpenAiClient();
-  const model = _providerConfig?.model ?? 'gpt-5-mini';
-  const provider = _providerConfig?.provider ?? 'openai';
+  const model = configOverride?.model ?? _providerConfig?.model ?? 'gpt-5-mini';
+  const provider = configOverride?.provider ?? _providerConfig?.provider ?? 'openai';
 
   logger.debug({ model, provider, systemLength: systemPrompt.length }, 'LLM call (OpenAI-compatible)');
 

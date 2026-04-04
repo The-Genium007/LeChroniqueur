@@ -1,5 +1,6 @@
 import type { SqliteDatabase } from '../core/database.js';
 import type { InstanceProfile } from '../core/instance-profile.js';
+import type { VeilleCategory } from './queries.js';
 import type { RawArticle } from './collector.js';
 import { getLogger } from '../core/logger.js';
 
@@ -16,6 +17,7 @@ export interface PrefilterStats {
   readonly afterUrlFilter: number;
   readonly afterContentFilter: number;
   readonly afterNearDedup: number;
+  readonly afterTitleRelevance: number;
   readonly rejectedByReason: Record<string, number>;
 }
 
@@ -230,12 +232,57 @@ function filterNearDuplicates(
   return passed;
 }
 
+// ─── Filter 4: Title relevance ───
+
+/**
+ * Reject articles whose title doesn't match any category keyword or profile niche term.
+ * This prevents sending obviously off-topic articles to the LLM for scoring.
+ */
+function filterTitleRelevance(
+  articles: readonly RawArticle[],
+  categories: readonly VeilleCategory[],
+  profile: InstanceProfile | undefined,
+  reasons: Record<string, number>,
+): RawArticle[] {
+  // Build keyword set from categories (EN) + profile niche
+  const keywords = new Set<string>();
+  for (const cat of categories) {
+    for (const kw of cat.keywords.en) {
+      keywords.add(kw.toLowerCase());
+    }
+  }
+  // Add niche terms (words > 3 chars)
+  if (profile !== undefined) {
+    for (const term of profile.projectNiche.split(/\s+/)) {
+      if (term.length > 3) keywords.add(term.toLowerCase());
+    }
+  }
+
+  // If no keywords at all, skip this filter
+  if (keywords.size === 0) return [...articles];
+
+  return articles.filter((a) => {
+    const lower = a.title.toLowerCase();
+    for (const kw of keywords) {
+      if (lower.includes(kw)) return true;
+    }
+    // Also check snippet for relevance (some titles are vague)
+    const snippetLower = a.snippet.toLowerCase();
+    for (const kw of keywords) {
+      if (snippetLower.includes(kw)) return true;
+    }
+    reasons['title_irrelevant'] = (reasons['title_irrelevant'] ?? 0) + 1;
+    return false;
+  });
+}
+
 // ─── Main prefilter function ───
 
 export function prefilter(
   articles: readonly RawArticle[],
   profile: InstanceProfile | undefined,
   db?: SqliteDatabase,
+  categories?: readonly VeilleCategory[],
 ): PrefilterResult {
   const logger = getLogger();
   const reasons: Record<string, number> = {};
@@ -255,12 +302,18 @@ export function prefilter(
   // Filter 3: Near-duplicate by title
   const afterNearDedup = filterNearDuplicates(afterContentFilter, reasons);
 
+  // Filter 4: Title relevance (skip if no categories)
+  const afterTitleRelevance = categories !== undefined && categories.length > 0
+    ? filterTitleRelevance(afterNearDedup, categories, profile, reasons)
+    : afterNearDedup;
+
   const stats: PrefilterStats = {
     input: articles.length,
     afterDbDedup: afterDbDedup.length,
     afterUrlFilter: afterUrlFilter.length,
     afterContentFilter: afterContentFilter.length,
     afterNearDedup: afterNearDedup.length,
+    afterTitleRelevance: afterTitleRelevance.length,
     rejectedByReason: reasons,
   };
 
@@ -270,8 +323,9 @@ export function prefilter(
     afterUrlFilter: stats.afterUrlFilter,
     afterContentFilter: stats.afterContentFilter,
     afterNearDedup: stats.afterNearDedup,
+    afterTitleRelevance: stats.afterTitleRelevance,
     rejectedByReason: stats.rejectedByReason,
   }, 'Pre-filter complete');
 
-  return { passed: afterNearDedup, stats };
+  return { passed: afterTitleRelevance, stats };
 }
