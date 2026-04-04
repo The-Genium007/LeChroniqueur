@@ -86,14 +86,16 @@ export async function collectFromYouTubeData(
   const maxResults = (config['maxResults'] as number | undefined) ?? 10;
   const customKeywords = (config['keywords'] as string[] | undefined) ?? [];
 
-  // Build keyword list from categories (English only) + custom keywords
+  // Build keyword list from categories (English only)
+  // Custom keywords are added only if they look English (no accented chars)
   const keywords: string[] = [];
   for (const cat of categories) {
     for (const kw of cat.keywords.en.slice(0, 2)) {
       keywords.push(kw);
     }
   }
-  keywords.push(...customKeywords);
+  const enCustom = customKeywords.filter((kw) => !/[àâäéèêëïîôùûüÿçœæ]/i.test(kw));
+  keywords.push(...enCustom);
 
   // Deduplicate keywords
   const uniqueKeywords = [...new Set(keywords)].slice(0, 20);
@@ -167,6 +169,12 @@ export async function collectFromYouTubeData(
       for (const item of data.items) {
         const videoUrl = `https://youtube.com/watch?v=${item.id.videoId}`;
         if (seenUrls.has(videoUrl)) continue;
+
+        // Relevance filter: title must contain at least one category keyword
+        if (!isRelevantTitle(item.snippet.title, categories)) {
+          continue;
+        }
+
         seenUrls.add(videoUrl);
 
         allArticles.push({
@@ -262,6 +270,25 @@ function extractVideoId(url: string): string | undefined {
     }
   } catch { /* invalid URL */ }
   return undefined;
+}
+
+/**
+ * Check if a YouTube video title is relevant to at least one category keyword.
+ * Filters out noise like "Teen Patti Master", "J.D.R Official" etc.
+ */
+function isRelevantTitle(title: string, categories: readonly VeilleCategory[]): boolean {
+  const lower = title.toLowerCase();
+  // Common RPG terms that indicate relevance even without exact keyword match
+  const rpgTerms = ['rpg', 'dnd', 'd&d', 'tabletop', 'ttrpg', 'dungeon', 'dragon', 'game master', 'dm ', 'gm '];
+  for (const term of rpgTerms) {
+    if (lower.includes(term)) return true;
+  }
+  for (const cat of categories) {
+    for (const kw of cat.keywords.en) {
+      if (lower.includes(kw.toLowerCase())) return true;
+    }
+  }
+  return false;
 }
 
 function matchCategory(keyword: string, categories: readonly VeilleCategory[]): string {

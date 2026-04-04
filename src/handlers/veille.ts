@@ -18,13 +18,21 @@ import { sendSplit } from '../discord/message-splitter.js';
 import type { InstanceContext } from '../registry/instance-context.js';
 import type { TextChannel } from 'discord.js';
 
+function deriveSourceType(source: string): string {
+  if (source.startsWith('reddit/')) return 'reddit';
+  if (source.startsWith('youtube/') || source === 'youtube') return 'youtube';
+  if (source === 'rss' || source === 'rss_feed') return 'rss';
+  if (source === 'web_search') return 'web_search';
+  return 'searxng';
+}
+
 function saveArticle(db: SqliteDatabase, article: AnalyzedArticle): number {
   const result = db.prepare(`
     INSERT INTO veille_articles (
       url, title, snippet, source, language, category,
       score, pillar, suggested_angle, translated_title,
-      translated_snippet, thumbnail_url, status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')
+      translated_snippet, thumbnail_url, status, source_type
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?)
   `).run(
     article.url,
     article.title,
@@ -38,6 +46,7 @@ function saveArticle(db: SqliteDatabase, article: AnalyzedArticle): number {
     article.translatedTitle ?? null,
     article.translatedSnippet ?? null,
     article.thumbnailUrl ?? null,
+    deriveSourceType(article.source),
   );
 
   return Number(result.lastInsertRowid);

@@ -23,8 +23,9 @@ export async function collectFromSearxng(
     // English-only: use up to 3 EN keywords
     const enKeywords = category.keywords.en.slice(0, 3);
 
-    // Filter out YouTube engine (handled by native YouTube Data API collector)
-    const engines = category.engines.filter((e) => e !== 'youtube');
+    // Use sane SearXNG engines — ignore category.engines (may contain invalid ones like twitter, reddit, imgur)
+    // Reddit and YouTube are handled by native collectors
+    const engines = ['google', 'bing', 'duckduckgo'];
 
     for (const kw of enKeywords) {
       try {

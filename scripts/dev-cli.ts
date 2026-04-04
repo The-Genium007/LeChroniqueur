@@ -69,10 +69,11 @@ function createStubChannel(name: string): import('discord.js').TextChannel {
           console.log(`  ... (${String(text.split('\n').length - 20)} more lines)`);
         }
       }
-      return { id: `msg-${Date.now()}` };
+      return { id: `msg-${Date.now()}`, startThread: async (opts: { name: string }) => createStubChannel(`thread-${opts.name}`) };
     },
     messages: { fetch: async () => new Map() },
     threads: { create: async (opts: { name: string }) => createStubChannel(`thread-${opts.name}`) },
+    startThread: async (opts: { name: string }) => createStubChannel(`thread-${opts.name}`),
   };
   return stub as unknown as import('discord.js').TextChannel;
 }
