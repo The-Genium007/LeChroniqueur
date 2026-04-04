@@ -1066,24 +1066,65 @@ async function main(): Promise<void> {
         return;
       }
 
-      // Handle refine_project answers (text free response to 6 questions)
-      if (session.step === 'refine_project') {
-        const { processRefineAnswers } = await import('./onboarding/wizard/refine-project.js');
+      // Handle confidence_loop answers (free text responses to LLM questions)
+      if (session.step === 'confidence_loop') {
+        const {
+          evaluateAndAsk, buildQuestionMessage, buildProfileSummary,
+          updateEnrichmentFromResult, applyEnrichmentToSession, getEnrichmentData, isConfidenceReached,
+        } = await import('./onboarding/wizard/confidence-loop.js');
         const { advanceStep } = await import('./onboarding/wizard/state-machine.js');
+        const { sendSplit: splitMsg } = await import('./discord/message-splitter.js');
+
         await message.react('⏳');
+
+        // Store user answer in conversation history
+        session.conversationHistory.push({ role: 'user', content: message.content });
+        saveWizardSession(globalDb, session);
+
         try {
-          const { message: responsePayload } = await processRefineAnswers(session, message.content);
-          // Auto-advance to validate_profile step
-          advanceStep(session);
+          const siteAnalysis = (session.data as Record<string, unknown>)['_siteAnalysis'] as import('./onboarding/wizard/site-scraper.js').SiteAnalysis | undefined;
+          const enrichment = getEnrichmentData(session);
+          const questionNum = enrichment.questionCount + 1;
+
+          const result = await evaluateAndAsk(session, siteAnalysis, questionNum);
+          updateEnrichmentFromResult(session, result);
           saveWizardSession(globalDb, session);
-          await message.reply({ components: responsePayload.components as never[], flags: responsePayload.flags } as never);
+
+          if (result.question !== null && !isConfidenceReached(result.confidence, questionNum)) {
+            // Next question
+            session.conversationHistory.push({ role: 'assistant', content: result.question });
+            saveWizardSession(globalDb, session);
+            const payload = buildQuestionMessage(result.question, result.confidence, questionNum);
+            await splitMsg(message.channel as import('discord.js').TextChannel, payload);
+          } else {
+            // Confidence reached — show profile summary and advance
+            applyEnrichmentToSession(session);
+            advanceStep(session); // → validate_profile
+            saveWizardSession(globalDb, session);
+            const payload = buildProfileSummary(session, result.confidence, siteAnalysis);
+            await splitMsg(message.channel as import('discord.js').TextChannel, payload);
+
+            // Add validation buttons
+            const { buildContainer: bc, txt: t, sep: s, btn: b, row: r, v2: v, getColor: gc, ButtonStyle: bs } = await import('./discord/component-builder-v2.js');
+            const btnPayload = v([bc(gc('success'), (c) => {
+              c.addTextDisplayComponents(t('Valide le profil ou demande des corrections.'));
+              c.addSeparatorComponents(s());
+              c.addActionRowComponents(r(
+                b('wizard:next', 'Valider', bs.Success, '✅'),
+                b('wizard:back', 'Corriger', bs.Secondary, '✏️'),
+              ));
+            })]);
+            await splitMsg(message.channel as import('discord.js').TextChannel, btnPayload);
+          }
         } catch (error) {
           const errMsg = error instanceof Error ? error.message : String(error);
-          getLogger().error({ error: errMsg }, 'Refine answers processing failed');
-          await message.reply({ content: `❌ Erreur lors de l'analyse : ${errMsg.slice(0, 200)}. Réessaie.` });
+          getLogger().error({ error: errMsg }, 'Confidence loop failed');
+          await message.reply({ content: `❌ Erreur : ${errMsg.slice(0, 200)}. Réessaie.` });
         }
         return;
       }
+
+      // (refine_project removed — replaced by confidence_loop)
 
       // Handle modification text for any step (when wizard:modify was clicked)
       const isModifying = (session.data as Record<string, unknown>)['_awaitingModification'] === true;

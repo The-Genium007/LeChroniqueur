@@ -6,7 +6,8 @@ import type { InstanceVeilleCategory } from '../../core/config.js';
 
 export type WizardStep =
   | 'describe_project'
-  | 'refine_project'
+  | 'scrape_site'
+  | 'confidence_loop'
   | 'validate_profile'
   | 'review_categories'
   | 'dryrun_searxng'
@@ -24,7 +25,8 @@ export type WizardStep =
 
 export const WIZARD_STEPS_ORDER: readonly WizardStep[] = [
   'describe_project',
-  'refine_project',
+  'scrape_site',
+  'confidence_loop',
   'validate_profile',
   'review_categories',
   'dryrun_searxng',
@@ -125,8 +127,8 @@ export interface WizardSession {
   readonly createdAt: Date;
 }
 
-const MAX_ITERATIONS = 20;
-const SESSION_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 hours
+const MAX_ITERATIONS = 40;
+const SESSION_TIMEOUT_MS = 4 * 60 * 60 * 1000; // 4 hours (confidence loop can take time)
 
 // ─── Session CRUD ───
 

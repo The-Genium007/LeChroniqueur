@@ -675,28 +675,10 @@ export async function handleWizardInteraction(
     const { buildDescribeModal } = await import('./describe.js');
     await interaction.showModal(buildDescribeModal());
 
-  // ─── Refine validate button ───
+  // ─── Refine validate button (legacy, now handled by confidence loop) ───
   } else if (customId === 'wizard:refine:validate') {
-    // Check if answers were already processed by the DM handler
-    if (session.data.onboardingContext !== undefined && session.data.onboardingContext.length > 0) {
-      // Already processed — just show validation if not already shown
-      if (session.step === 'refine_project') {
-        try { await interaction.deferReply({ ephemeral: true }); } catch { /* expired */ }
-        const { buildProfileValidation } = await import('./refine-project.js');
-        advanceStep(session);
-        saveWizardSession(globalDb, session);
-        const payload = buildProfileValidation(session);
-        await dmSplit(interaction.user, payload, session);
-        saveWizardSession(globalDb, session);
-        try { interaction.deleteReply().catch(() => {}); } catch { /* expired */ }
-      } else {
-        // Already advanced — just dismiss the button
-        if (!interaction.replied && !interaction.deferred) {
-          try { await interaction.deferUpdate(); } catch { /* expired */ }
-        }
-      }
-    } else {
-      await interaction.reply({ content: '⚠️ Envoie d\'abord tes réponses aux questions dans le chat, puis clique sur Valider.', ephemeral: true });
+    if (!interaction.replied && !interaction.deferred) {
+      try { await interaction.deferUpdate(); } catch { /* expired */ }
     }
 
   // ─── Source selection buttons ───
@@ -1272,6 +1254,31 @@ async function advanceToDescribe(
   }
 }
 
+async function runConfidenceLoopStep(
+  session: WizardSession,
+  globalDb: SqliteDatabase,
+): Promise<import('../../discord/component-builder-v2.js').V2MessagePayload> {
+  const { evaluateAndAsk, buildQuestionMessage, updateEnrichmentFromResult, getEnrichmentData, buildProfileSummary, applyEnrichmentToSession } = await import('./confidence-loop.js');
+  const siteAnalysis = (session.data as Record<string, unknown>)['_siteAnalysis'] as import('./site-scraper.js').SiteAnalysis | undefined;
+  const enrichment = getEnrichmentData(session);
+  const questionNum = enrichment.questionCount + 1;
+  const result = await evaluateAndAsk(session, siteAnalysis, questionNum);
+  updateEnrichmentFromResult(session, result);
+  saveWizardSession(globalDb, session);
+
+  if (result.question !== null) {
+    session.conversationHistory.push({ role: 'assistant', content: result.question });
+    saveWizardSession(globalDb, session);
+    return buildQuestionMessage(result.question, result.confidence, questionNum);
+  }
+
+  // Confidence reached — apply enrichment and build summary
+  applyEnrichmentToSession(session);
+  advanceStep(session); // → validate_profile
+  saveWizardSession(globalDb, session);
+  return buildProfileSummary(session, result.confidence, siteAnalysis);
+}
+
 async function handleWizardNext(
   interaction: ButtonInteraction,
   session: WizardSession,
@@ -1297,14 +1304,58 @@ async function handleWizardNext(
 
   try {
     switch (nextStep) {
-      case 'refine_project': {
-        const { buildRefineQuestions } = await import('./refine-project.js');
-        payload = buildRefineQuestions(session);
+      case 'scrape_site': {
+        // Auto-scrape site if URL provided, then move to confidence loop
+        if (session.data.projectUrl !== undefined && session.data.projectUrl.length > 0) {
+          const { scrapeAndAnalyze } = await import('./site-scraper.js');
+          const scrapingMsg = v2([buildContainer(getColor('info'), (c) => {
+            c.addTextDisplayComponents(txt(`## 🌐 Analyse du site web...\nScraping de ${session.data.projectUrl ?? ''}...`));
+          })]);
+          await dmSplit(interaction.user, scrapingMsg, session);
+          saveWizardSession(globalDb, session);
+
+          try {
+            const analysis = await scrapeAndAnalyze(session.data.projectUrl);
+            (session.data as Record<string, unknown>)['_siteAnalysis'] = analysis;
+            saveWizardSession(globalDb, session);
+
+            if (analysis.productDescription.length > 0) {
+              const resultMsg = v2([buildContainer(getColor('success'), (c) => {
+                c.addTextDisplayComponents(txt([
+                  '## ✅ Site analysé',
+                  '',
+                  `📦 **Produit** : ${analysis.productDescription.slice(0, 200)}`,
+                  analysis.targetAudience.length > 0 ? `👥 **Public** : ${analysis.targetAudience.slice(0, 200)}` : '',
+                  analysis.competitors.length > 0 ? `🏢 **Concurrents** : ${analysis.competitors.join(', ')}` : '',
+                  analysis.keywords.length > 0 ? `🔑 **Keywords** : ${analysis.keywords.slice(0, 10).join(', ')}` : '',
+                ].filter(Boolean).join('\n')));
+              })]);
+              await dmSplit(interaction.user, resultMsg, session);
+              saveWizardSession(globalDb, session);
+            }
+          } catch {
+            const failMsg = v2([buildContainer(getColor('warning'), (c) => {
+              c.addTextDisplayComponents(txt('## ⚠️ Scraping échoué\nPas de souci — je vais te poser quelques questions supplémentaires.'));
+            })]);
+            await dmSplit(interaction.user, failMsg, session);
+            saveWizardSession(globalDb, session);
+          }
+        }
+        // Auto-advance to confidence loop and run first question
+        advanceStep(session);
+        saveWizardSession(globalDb, session);
+        payload = await runConfidenceLoopStep(session, globalDb);
+        break;
+      }
+      case 'confidence_loop': {
+        payload = await runConfidenceLoopStep(session, globalDb);
         break;
       }
       case 'validate_profile': {
-        const { buildProfileValidation } = await import('./refine-project.js');
-        payload = buildProfileValidation(session);
+        const { buildProfileSummary, getEnrichmentData: getEnrich } = await import('./confidence-loop.js');
+        const siteAn = (session.data as Record<string, unknown>)['_siteAnalysis'] as import('./site-scraper.js').SiteAnalysis | undefined;
+        const enrich = getEnrich(session);
+        payload = buildProfileSummary(session, enrich.confidence, siteAn);
         break;
       }
       case 'review_categories':
@@ -1463,14 +1514,16 @@ async function handleWizardBack(
       payload = buildDescribePrompt(session);
       break;
     }
-    case 'refine_project': {
-      const { buildRefineQuestions } = await import('./refine-project.js');
-      payload = buildRefineQuestions(session);
+    case 'scrape_site':
+    case 'confidence_loop': {
+      payload = await runConfidenceLoopStep(session, globalDb);
       break;
     }
     case 'validate_profile': {
-      const { buildProfileValidation } = await import('./refine-project.js');
-      payload = buildProfileValidation(session);
+      const { buildProfileSummary: buildSummaryVal, getEnrichmentData: getEnrichVal } = await import('./confidence-loop.js');
+      const siteAnVal = (session.data as Record<string, unknown>)['_siteAnalysis'] as import('./site-scraper.js').SiteAnalysis | undefined;
+      const enrichVal = getEnrichVal(session);
+      payload = buildSummaryVal(session, enrichVal.confidence, siteAnVal);
       break;
     }
     case 'review_categories': {
